@@ -9,5 +9,7 @@ export async function loadAsr({ model = "onnx-community/whisper-base", onProgres
     progress_callback: onProgress,
   });
   // audio16k: mono Float32Array @ 16 kHz, <= 30 s. Language is left unset so the model detects it.
+  // warm-up: the first run compiles the GPU kernels; do it while the page loads, not when the user picks a voice
+  await asr(Float32Array.from({ length: 3 * 16000 }, () => (Math.random() - 0.5) * 0.02), { task: "transcribe" }).catch(() => {});
   return async (audio16k) => ((await asr(audio16k, { task: "transcribe" })).text || "").trim();
 }

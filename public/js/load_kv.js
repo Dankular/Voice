@@ -62,6 +62,9 @@ export async function loadKV({ kvBase = DEFAULT_KV_BASE, onStatus = () => {} } =
   const warm = async (engine) => {
     const frames = 200, codes = Int32Array.from({ length: 8 * frames }, (_, i) => (i * 37) % 1024);
     await engine.synthesize("This is a short warm up sentence.", { codes, frames, rms: 0.1, text: "Warm up text for the reference." }, { numStep: 2, seed: 1 });
+    // codec encoder too: it runs once per voice and its first run otherwise pays the shader-compile cost on the user's path
+    const noise = Float32Array.from({ length: 8 * 24000 }, () => (Math.random() - 0.5) * 0.1);
+    await engine.encodeReference(noise);
   };
   let engine = null;
   for (const file of ["lm_fused.onnx", "lm_kv_q4.onnx"]) {

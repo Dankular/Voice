@@ -158,6 +158,7 @@ $("more").onclick = () => { page++; loadVoices(false); };
 // selected, runs ASR and the encoder concurrently, and is remembered across visits (IndexedDB; the codes are ~10 KB).
 const SIG = "ct03-enc+whisper-base-v1";                       // bump when the codec encoder or ASR model changes
 const inflight = new Map();
+let prepRuns = 0;                                          // 0 = first real preparation in this page session
 let lastPrep = "";
 
 const idb = () => new Promise((res, rej) => { const r = indexedDB.open("omnivoice-refs", 1); r.onupgradeneeded = () => r.result.createObjectStore("refs"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
@@ -184,7 +185,7 @@ async function doPrepare(voice) {
   t.both = performance.now() - t1;
   if (!text) throw new Error("could not transcribe the sample");
   const ref = { ...enc, text: addPunctuation(text) };
-  lastPrep = `prepared in ${((performance.now() - t0) / 1000).toFixed(1)} s — fetch+decode ${t.fetchDecode.toFixed(0)} ms, Whisper ${t.asr.toFixed(0)} ms, codec encode ${t.encode.toFixed(0)} ms (ran together: ${t.both.toFixed(0)} ms)`;
+  lastPrep = `${prepRuns++ === 0 ? "[first preparation this session] " : "[later preparation] "}prepared in ${((performance.now() - t0) / 1000).toFixed(1)} s — fetch+decode ${t.fetchDecode.toFixed(0)} ms, Whisper ${t.asr.toFixed(0)} ms, codec encode ${t.encode.toFixed(0)} ms (ran together: ${t.both.toFixed(0)} ms)`;
   cachePut(key, { ...ref, codes: ref.codes.buffer.slice(0) });
   return ref;
 }
@@ -201,19 +202,19 @@ function prepare(voice) {
 function prefetch() {
   if (!(omni && transcribe && picked)) return;
   const v = picked;
-  prepare(v).then(() => { if (picked === v) $("status").textContent = "Voice ready."; $("perf").textContent = lastPrep; })
+  prepare(v).then(() => { if (picked === v) $("status").textContent = "Voice ready."; $("perf").textContent = lastPrep; if (kvMod?.PROFILE) showProfile("codec encoder"); })
             .catch((e) => { if (picked === v) $("err").textContent = String(e.message || e); });
 }
 
 function updateGo() { $("go").disabled = !(omni && transcribe && picked); }
 
 // ?profile=1: where does the GPU time go? Aggregates the per-kernel timings collected since the last call.
-function showProfile() {
+function showProfile(label = "synthesis") {
   const rows = kvMod.profileRows.splice(0), by = new Map();
   let total = 0;
   for (const r of rows) { const ms = (r.endTime - r.startTime) / 1e6, k = r.kernelType; total += ms; const e = by.get(k) || { n: 0, ms: 0 }; e.n++; e.ms += ms; by.set(k, e); }
   const top = [...by].sort((a, b) => b[1].ms - a[1].ms).slice(0, 12).map(([k, e]) => `${k.padEnd(34)} ${String(e.n).padStart(6)} kernels  ${e.ms.toFixed(1).padStart(8)} ms`);
-  $("prof").textContent = `GPU kernel time ${total.toFixed(0)} ms over ${rows.length} kernels\n` + top.join("\n");
+  $("prof").textContent = `[${label}] GPU kernel time ${total.toFixed(0)} ms over ${rows.length} kernels\n` + top.join("\n");
 }
 
 let player = null, cancelled = false;
