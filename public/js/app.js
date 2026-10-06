@@ -1,6 +1,7 @@
 import { decodeToMono, resample, trimEdges, capLength, wavBlob } from "./audio.js";
 
 const SAMPLE_RATE = 24000;
+const REF_MAX_S = 30;   // the whole sample is used; 30 s is Whisper's window, so longer audio could not be transcribed in full
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const END = new Set(";:,.!?…)]}\"'“”‘’；：，。！？、……）】");
@@ -28,7 +29,7 @@ function chunkText(text) {
   return out.length ? out : [text];
 }
 
-let engineName = "", omni = null, transcribe = null, picked = null, page = 0, last = new FormData();
+let kvMod = null, engineName = "", omni = null, transcribe = null, picked = null, page = 0, last = new FormData();
 const refs = new Map();   // voice_id -> prepared reference (transcribed + encoded once)
 
 // ---------- models: load at page load ----------
@@ -51,7 +52,9 @@ async function loadModels() {
     const asrP = loadAsr({ onProgress: (p) => p.status === "progress" && status("Whisper " + (p.file || ""), p.loaded, p.total) });
     const kvBase = new URLSearchParams(location.search).get("kv") || undefined;
     try {                                        // fast engine: cached prefix + 4-bit LM (needs the files from export/build_all.sh)
-      omni = await (await import("./load_kv.js")).loadKV({ kvBase, onStatus: status });
+      kvMod = await import("./load_kv.js");
+      omni = await kvMod.loadKV({ kvBase, onStatus: status });
+      if (kvMod.PROFILE) kvMod.profileRows.length = 0;
       engineName = omni.fused ? "cached-prefix, fused 4-bit" : "cached-prefix 4-bit";
     } catch (e) {                                // fall back to the slower full-recompute engine
       console.warn("fast engine unavailable, falling back:", e);
@@ -61,7 +64,7 @@ async function loadModels() {
     }
     transcribe = await asrP;
     $("models").textContent = `Models ready — ${engineName} on ${omni.providers[0]}.`;
-    updateGo();
+    updateGo(); prefetch();
   } catch (e) { $("err").textContent = "Model load failed: " + (e.message || e); console.error(e); }
 }
 
@@ -121,7 +124,7 @@ function renderList() {
     el.querySelector("audio").addEventListener("click", (e) => e.stopPropagation());
     el.onclick = () => {
       document.querySelectorAll(".voice.sel").forEach((x) => x.classList.remove("sel"));
-      el.classList.add("sel"); picked = v; $("picked").textContent = v.name; updateGo();
+      el.classList.add("sel"); picked = v; $("picked").textContent = v.name; updateGo(); $("err").textContent = ""; prefetch();
     };
     $("list").appendChild(el);
   }
@@ -151,26 +154,67 @@ $("filters").onsubmit = (e) => { e.preventDefault(); last = new FormData($("filt
 $("more").onclick = () => { page++; loadVoices(false); };
 
 // ---------- pick -> transcribe on the fly -> clone ----------
-async function prepare(voice) {
-  const cap = Number($("refcap").value), key = `${voice.voice_id}:${cap}`;   // shorter reference = shorter sequence = faster
-  if (refs.has(key)) return refs.get(key);
+// Preparation (fetch sample -> transcribe -> codec-encode) does not depend on the text, so it starts as soon as a voice is
+// selected, runs ASR and the encoder concurrently, and is remembered across visits (IndexedDB; the codes are ~10 KB).
+const SIG = "ct03-enc+whisper-base-v1";                       // bump when the codec encoder or ASR model changes
+const inflight = new Map();
+let lastPrep = "";
+
+const idb = () => new Promise((res, rej) => { const r = indexedDB.open("omnivoice-refs", 1); r.onupgradeneeded = () => r.result.createObjectStore("refs"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+async function cacheGet(key) { try { const db = await idb(); return await new Promise((res) => { const q = db.transaction("refs").objectStore("refs").get(key); q.onsuccess = () => res(q.result); q.onerror = () => res(null); }); } catch { return null; } }
+async function cachePut(key, v) { try { const db = await idb(); db.transaction("refs", "readwrite").objectStore("refs").put(v, key); } catch { /* storage blocked: fine */ } }
+
+async function doPrepare(voice) {
+  const key = `${SIG}:${voice.voice_id}`, t = {};
+  const saved = await cacheGet(key);
+  if (saved) { lastPrep = "prepared from cache"; return { ...saved, codes: new Int32Array(saved.codes) }; }
+  let t0 = performance.now();
   $("status").textContent = "Fetching voice sample…";
   const r = await fetch(`/api/preview/${encodeURIComponent(voice.voice_id)}`);
   if (!r.ok) throw new Error("could not fetch the voice sample");
   const bytes = new Uint8Array(await r.arrayBuffer());
-  let x24 = trimEdges(capLength(await decodeToMono(bytes, SAMPLE_RATE), SAMPLE_RATE, cap), SAMPLE_RATE);
+  const x24 = trimEdges(capLength(await decodeToMono(bytes, SAMPLE_RATE), SAMPLE_RATE, REF_MAX_S), SAMPLE_RATE);
   if (x24.length < SAMPLE_RATE) throw new Error("voice sample is too short");
-  $("status").textContent = "Transcribing the sample…";
-  const text = await transcribe(await resample(x24, SAMPLE_RATE, 16000));
+  const x16 = await resample(x24, SAMPLE_RATE, 16000);
+  t.fetchDecode = performance.now() - t0;
+  $("status").textContent = "Transcribing and encoding the sample…";
+  const timed = async (name, f) => { const s0 = performance.now(); const v = await f(); t[name] = performance.now() - s0; return v; };
+  const t1 = performance.now();
+  const [text, enc] = await Promise.all([timed("asr", () => transcribe(x16)), timed("encode", () => omni.encodeReference(x24))]);   // independent: run concurrently
+  t.both = performance.now() - t1;
   if (!text) throw new Error("could not transcribe the sample");
-  $("status").textContent = "Encoding the sample…";
-  const enc = await omni.encodeReference(x24);
   const ref = { ...enc, text: addPunctuation(text) };
-  refs.set(key, ref);
+  lastPrep = `prepared in ${((performance.now() - t0) / 1000).toFixed(1)} s — fetch+decode ${t.fetchDecode.toFixed(0)} ms, Whisper ${t.asr.toFixed(0)} ms, codec encode ${t.encode.toFixed(0)} ms (ran together: ${t.both.toFixed(0)} ms)`;
+  cachePut(key, { ...ref, codes: ref.codes.buffer.slice(0) });
   return ref;
 }
 
+function prepare(voice) {
+  const key = voice.voice_id;
+  if (refs.has(key)) return Promise.resolve(refs.get(key));
+  if (!inflight.has(key)) {
+    inflight.set(key, doPrepare(voice).then((ref) => { refs.set(key, ref); return ref; }).finally(() => inflight.delete(key)));
+  }
+  return inflight.get(key);
+}
+// start preparing as soon as a voice is picked (or as soon as the models finish loading)
+function prefetch() {
+  if (!(omni && transcribe && picked)) return;
+  const v = picked;
+  prepare(v).then(() => { if (picked === v) $("status").textContent = "Voice ready."; $("perf").textContent = lastPrep; })
+            .catch((e) => { if (picked === v) $("err").textContent = String(e.message || e); });
+}
+
 function updateGo() { $("go").disabled = !(omni && transcribe && picked); }
+
+// ?profile=1: where does the GPU time go? Aggregates the per-kernel timings collected since the last call.
+function showProfile() {
+  const rows = kvMod.profileRows.splice(0), by = new Map();
+  let total = 0;
+  for (const r of rows) { const ms = (r.endTime - r.startTime) / 1e6, k = r.kernelType; total += ms; const e = by.get(k) || { n: 0, ms: 0 }; e.n++; e.ms += ms; by.set(k, e); }
+  const top = [...by].sort((a, b) => b[1].ms - a[1].ms).slice(0, 12).map(([k, e]) => `${k.padEnd(34)} ${String(e.n).padStart(6)} kernels  ${e.ms.toFixed(1).padStart(8)} ms`);
+  $("prof").textContent = `GPU kernel time ${total.toFixed(0)} ms over ${rows.length} kernels\n` + top.join("\n");
+}
 
 let player = null, cancelled = false;
 $("stop").onclick = () => { cancelled = true; player?.stop(); };
@@ -182,13 +226,14 @@ $("go").onclick = async () => {
   cancelled = false; player?.stop(); player = new Player();
   try {
     const ref = await prepare(picked);
-    const opts = { numStep: Number($("steps").value), guidance: $("cfg").checked ? 2.0 : 0 };
+    const opts = { guidance: $("cfg").checked ? 2.0 : 0 };   // steps: engine default
     const pieces = chunkText(text), lines = [];
     for (let i = 0; i < pieces.length && !cancelled; i++) {
       const t = performance.now();
       const wav = await omni.synthesize(pieces[i], ref, { ...opts, onStep: (st) => { $("status").textContent = `Chunk ${i + 1}/${pieces.length} — step ${st.step}/${st.of}`; } });
       if (cancelled) break;
       player.push(wav);
+      if (kvMod?.PROFILE) showProfile();
       const secs = (performance.now() - t) / 1000, audio = wav.length / SAMPLE_RATE, st = wav.timing.steps;
       const first = st[0], rest = st.slice(1);
       const avg = (k) => (rest.reduce((a, x) => a + x[k], 0) / Math.max(1, rest.length)).toFixed(0);

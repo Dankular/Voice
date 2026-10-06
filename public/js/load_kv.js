@@ -7,6 +7,10 @@ import { fetchBytes } from "./cache.js";
 import { OmniVoiceKV } from "./omnivoice_kv.js";
 
 ort.env.wasm.wasmPaths = "/vendor/ort/";
+// `?profile=1`: per-kernel GPU timings (ORT-Web WebGPU profiling). Must be set before the first session is created.
+export const PROFILE = new URLSearchParams(location.search).has("profile");
+export const profileRows = [];
+if (PROFILE) ort.env.webgpu.profiling = { mode: "default", ondata: (d) => profileRows.push(d) };
 // Same-origin by default: the files are committed as <=80 MB parts (public/models/kv + manifest.json) because git hosts reject
 // bigger files. Any base URL that serves the whole files directly (e.g. a Hugging Face repo) also works, via ?kv=<base>.
 export const DEFAULT_KV_BASE = "/models/kv";

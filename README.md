@@ -35,7 +35,7 @@ voice sample, recomputed every step.
   audio output head stays fp32. Text/audio embedding lookups moved to JS (tables: 155 MB int8 text, 33 MB audio).
 - GPU-resident logits + post-processing graph, bucketed shapes, one-off GPU warm-up at page load, sentence-chunked playback.
 - Guidance (CFG) now costs about as much as a cached step (its pass is target-only, no cache), so it defaults to OFF.
-- Defaults: 8 steps, guidance off, 12 s voice sample. The page shows RTF and per-step timings (full pass vs cached steps).
+- Defaults: 8 steps, guidance off; the voice sample is used whole (capped at Whisper's 30 s window). No UI knobs for these. The page shows RTF and per-step timings (full pass vs cached steps).
 - Model files (~480 MB) are committed under `public/models/kv/` as parts ≤ 80 MB (git hosts reject larger files) with a
   `manifest.json` (sizes + sha256); the page downloads the parts in parallel, stitches them, and the browser caches them.
   Served same-origin by `app.py` with long-lived cache headers. `?kv=<base url>` points at any host serving the whole files.
