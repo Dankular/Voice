@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OmniVoice Client VAD</title>
+<link rel="icon" href="data:,">
+<style>
+  :root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--acc:#2563eb;--on:#16a34a}
+  @media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--mut:#999;--line:#333;--acc:#60a5fa;--on:#4ade80}}
+  body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+  main{max-width:720px;margin:0 auto;padding:24px 16px}
+  h1{font-size:1.4rem;margin:0 0 4px} p.sub{color:var(--mut);margin:0 0 20px}
+  button{font:inherit;padding:8px 16px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);cursor:pointer}
+  button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  #state{display:inline-flex;align-items:center;gap:6px;color:var(--mut)}
+  #dot{width:10px;height:10px;border-radius:50%;background:var(--line)} #dot.on{background:var(--on)}
+  meter{width:160px}
+  fieldset{border:1px solid var(--line);border-radius:6px;margin:0 0 16px;padding:8px 12px}
+  label{display:inline-block;margin-right:16px;font-size:.9rem}
+  input[type=number]{width:70px}
+  .seg{border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:8px}
+  .seg .meta{color:var(--mut);font-size:.85rem;margin-bottom:6px} .seg audio{width:100%}
+  .seg a{margin-right:12px;font-size:.9rem;color:var(--acc)}
+  #err{color:#dc2626}
+</style>
+</head>
+<body>
+<main>
+  <h1>Client-side VAD</h1>
+  <p class="sub">Silero VAD running in your browser (ONNX Runtime Web). Audio never leaves the page. Captured speech segments can be exported as WAV, e.g. as a clean voice-cloning reference clip for
+  <a href="https://huggingface.co/onnx-community/OmniVoice-Onnx" style="color:var(--acc)">OmniVoice-Onnx</a>.</p>
+
+  <fieldset>
+    <legend>VAD settings (apply on next Start)</legend>
+    <label>Model <select id="model"><option value="v5">Silero v5</option><option value="legacy">Silero legacy</option></select></label>
+    <label>Speech threshold <input id="pos" type="number" step="0.05" min="0.1" max="0.99" value="0.3"></label>
+    <label>Redemption ms <input id="red" type="number" step="50" min="0" value="600"></label>
+    <label>Min speech ms <input id="min" type="number" step="50" min="0" value="400"></label>
+  </fieldset>
+
+  <div class="row">
+    <button id="toggle" class="primary">Start</button>
+    <button id="clear">Clear</button>
+    <span id="state"><span id="dot"></span><span id="label">idle</span></span>
+    <meter id="prob" min="0" max="1" value="0"></meter>
+  </div>
+  <div id="err"></div>
+  <div id="segs"></div>
+</main>
+
+<script src="vendor/ort.wasm.min.js"></script>
+<script src="vendor/bundle.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let vad_ = null, n = 0, urls = [];
+
+// Resample mono Float32 PCM to a target rate using an OfflineAudioContext.
+async function resample(f32, from, to) {
+  if (from === to) return f32;
+  const ctx = new OfflineAudioContext(1, Math.ceil(f32.length * to / from), to);
+  const buf = ctx.createBuffer(1, f32.length, from);
+  buf.copyToChannel(f32, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(ctx.destination); src.start();
+  return (await ctx.startRendering()).getChannelData(0);
+}
+const wavUrl = (f32, sr) => {
+  const url = URL.createObjectURL(new Blob([vad.utils.encodeWAV(f32, 1, sr, 1, 32)], { type: "audio/wav" }));
+  urls.push(url); return url;
+};
+
+async function addSegment(audio16k) {
+  const id = ++n, secs = (audio16k.length / 16000).toFixed(2);
+  const a24 = await resample(audio16k, 16000, 24000);
+  const div = document.createElement("div");
+  div.className = "seg";
+  div.innerHTML = `<div class="meta">Segment ${id} · ${secs}s</div>
+    <audio controls src="${wavUrl(audio16k, 16000)}"></audio>
+    <div><a href="${wavUrl(audio16k, 16000)}" download="segment-${id}-16k.wav">WAV 16 kHz</a>
+    <a href="${wavUrl(a24, 24000)}" download="segment-${id}-24k.wav">WAV 24 kHz</a></div>`;
+  $("segs").prepend(div);
+}
+
+function setState(on, text) { $("dot").classList.toggle("on", on); $("label").textContent = text; }
+
+async function start() {
+  $("err").textContent = "";
+  $("toggle").disabled = true; setState(false, "loading model…");
+  try {
+    vad_ = await vad.MicVAD.new({
+      model: $("model").value,
+      baseAssetPath: "/vendor/",
+      onnxWASMBasePath: "/vendor/",
+      positiveSpeechThreshold: +$("pos").value,
+      negativeSpeechThreshold: Math.max(0.05, +$("pos").value - 0.15),
+      redemptionMs: +$("red").value,
+      minSpeechMs: +$("min").value,
+      onFrameProcessed: p => { $("prob").value = p.isSpeech; },
+      onSpeechStart: () => setState(true, "speaking"),
+      onVADMisfire: () => setState(false, "listening"),
+      onSpeechEnd: audio => { setState(false, "listening"); addSegment(audio); },
+    });
+    await vad_.start();
+    setState(false, "listening");
+    $("toggle").textContent = "Stop";
+  } catch (e) {
+    $("err").textContent = "Failed to start: " + (e && e.message || e);
+    setState(false, "idle"); vad_ = null;
+  }
+  $("toggle").disabled = false;
+}
+async function stop() {
+  await vad_.destroy(); vad_ = null; $("prob").value = 0;
+  setState(false, "idle"); $("toggle").textContent = "Start";
+}
+$("toggle").onclick = () => vad_ ? stop() : start();
+$("clear").onclick = () => { $("segs").innerHTML = ""; urls.forEach(URL.revokeObjectURL); urls = []; n = 0; };
+</script>
+</body>
+</html>

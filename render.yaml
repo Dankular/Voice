@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: omnivoice-client-vad
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
