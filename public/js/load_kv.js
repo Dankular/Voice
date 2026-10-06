@@ -44,20 +44,31 @@ export async function loadKV({ kvBase = DEFAULT_KV_BASE, onStatus = () => {} } =
   const tf = async (label, name, T) => { const b = await kvBytes(kvBase, name, (g, t) => onStatus(label, g, t)); return new T(b.buffer, b.byteOffset, b.byteLength / T.BYTES_PER_ELEMENT); };
   const tables = { txt: await tf("text embeddings", "embed_text_int8.bin", Int8Array), txtScale: await tf("text scales", "embed_text_scale.bin", Float32Array),
                    aud: await tf("audio embeddings", "embed_audio.bin", Float32Array) };
-  const lmModel = await kvBytes(kvBase, "lm_kv_q4.onnx"), lmData = await kvBytes(kvBase, "lm_kv_q4.onnx.data", (g, t) => onStatus("OmniVoice LM (4-bit)", g, t));
+  // LM: try the hand-fused low-dispatch graph first (shares the same 4-bit weight file), fall back to the traced graph.
+  const lmData = await kvBytes(kvBase, "lm_kv_q4.onnx.data", (g, t) => onStatus("OmniVoice LM (4-bit)", g, t));
+  const lmSession = async (file) => ort.InferenceSession.create(await kvBytes(kvBase, file), { executionProviders: providers,
+    externalData: [{ path: "lm_kv_q4.onnx.data", data: lmData }], ...(gpu ? { preferredOutputLocation: "gpu-buffer" } : {}) });   // logits + K/V stay on the GPU
   onStatus("OmniVoice LM (4-bit)", 1, 1, "initialising");
-  const lm = await ort.InferenceSession.create(lmModel, { executionProviders: providers, externalData: [{ path: "lm_kv_q4.onnx.data", data: lmData }],
-    ...(gpu ? { preferredOutputLocation: "gpu-buffer" } : {}) });   // logits + K/V stay on the GPU between passes
   const decoder = await session("codec decoder", `${CODEC}/audio_tokenizer_decoder_int8/model.onnx`, `${CODEC}/audio_tokenizer_decoder_int8/model.onnx_data`, "model.onnx_data");
   const encoder = await session("codec encoder", `${CODEC}/audio_tokenizer_encoder_int8/model.onnx`, `${CODEC}/audio_tokenizer_encoder_int8/model.onnx_data`, "model.onnx_data");
-  const engine = new OmniVoiceKV({ ort, gpu, providers, tables,
-    tokenizer: { encode: (t) => tok.encode(t, { add_special_tokens: false }) },
-    sessions: { lm, decoder, encoder, postCfg: await post("post_cfg.onnx"), postNoCfg: await post("post_nocfg.onnx") } });
-
+  const postCfg = await post("post_cfg.onnx"), postNoCfg = await post("post_nocfg.onnx");
+  const make = (lm) => new OmniVoiceKV({ ort, gpu, providers, tables, tokenizer: { encode: (t) => tok.encode(t, { add_special_tokens: false }) },
+    sessions: { lm, decoder, encoder, postCfg, postNoCfg } });
   // Warm-up: the first run of each kernel/shape pays a one-off compile cost (~seconds on WebGPU); pay it here, not on the first Speak.
-  onStatus("GPU warm-up", 0, 0, "compiling kernels…");
-  const frames = 200, codes = Int32Array.from({ length: 8 * frames }, (_, i) => (i * 37) % 1024);
-  await engine.synthesize("This is a short warm up sentence.", { codes, frames, rms: 0.1, text: "Warm up text for the reference." }, { numStep: 2, seed: 1 });
-  onStatus("GPU warm-up", 1, 1, "done");
+  const warm = async (engine) => {
+    const frames = 200, codes = Int32Array.from({ length: 8 * frames }, (_, i) => (i * 37) % 1024);
+    await engine.synthesize("This is a short warm up sentence.", { codes, frames, rms: 0.1, text: "Warm up text for the reference." }, { numStep: 2, seed: 1 });
+  };
+  let engine = null;
+  for (const file of ["lm_fused.onnx", "lm_kv_q4.onnx"]) {
+    try {
+      const lm = await lmSession(file);
+      onStatus("GPU warm-up", 0, 0, `compiling kernels (${file})…`);
+      engine = make(lm); await warm(engine);
+      onStatus("GPU warm-up", 1, 1, "done");
+      break;
+    } catch (e) { console.warn(`${file} failed, trying the next graph:`, e); engine = null; }
+  }
+  if (!engine) throw new Error("no LM graph could be run on this device");
   return engine;
 }

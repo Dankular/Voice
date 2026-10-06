@@ -4,7 +4,8 @@ import hashlib, json, os, sys
 src, dst, mb = sys.argv[1], sys.argv[2], int(sys.argv[3])
 files = sys.argv[4:]
 os.makedirs(dst, exist_ok=True)
-man = {"files": {}}
+mp = os.path.join(dst, "manifest.json")
+man = json.load(open(mp)) if os.path.exists(mp) else {"files": {}}
 for name in files:
     data = open(os.path.join(src, name), "rb").read()
     n = max(1, -(-len(data) // (mb * 1024 * 1024)))
@@ -15,4 +16,4 @@ for name in files:
         open(os.path.join(dst, pn), "wb").write(data[i * step:(i + 1) * step]); parts.append(pn)
     man["files"][name] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "parts": parts}
     print(name, len(data), "->", len(parts), "part(s)")
-json.dump(man, open(os.path.join(dst, "manifest.json"), "w"), indent=1)
+json.dump(man, open(mp, "w"), indent=1)

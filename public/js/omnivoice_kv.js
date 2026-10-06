@@ -27,11 +27,19 @@ function blockMask(L, S) {
   return m;
 }
 
+// fused graph takes an additive float bias [1,1,2Q,L] (the Q x L mask, 0 / -1e9, duplicated for its 2 query groups per KV head)
+function biasFrom(mask, Q, Lc) {
+  const b = new Float32Array(2 * Q * Lc);
+  for (let r = 0; r < Q; r++) for (let c = 0; c < Lc; c++) { const v = mask[r * Lc + c] ? 0 : -1e9; b[r * Lc + c] = v; b[(Q + r) * Lc + c] = v; }
+  return b;
+}
+
 export class OmniVoiceKV {
   /** sessions: {lm, decoder, encoder, postCfg, postNoCfg}; tables: {txt:Int8Array, txtScale:Float32Array, aud:Float32Array}
    *  tokenizer: {encode(text)->ids}; gpu: keep LM outputs on the GPU (browser WebGPU only). */
   constructor({ ort, sessions, tables, tokenizer, gpu = false, providers = ["wasm"] }) {
     Object.assign(this, { ort, ...sessions, tables, tok: tokenizer, gpu, providers });
+    this.fused = this.lm.inputNames.includes("attention_bias");   // hand-fused low-dispatch graph (see export/build_fused.py)
     this.maskVec = new Float32Array(H);
     this.audioSum(new Int32Array(NC).fill(MASK), 0, this.maskVec, 0);
   }
@@ -93,17 +101,20 @@ export class OmniVoiceKV {
 
     // ---- constant inputs ----
     const T_ = (type, data, dims) => new ort.Tensor(type, data, dims);
-    const emptyPast = T_("float32", new Float32Array(0), [1, 8, 0, 128]);
-    const noPast = {}; for (let i = 0; i < NL; i++) { noPast[`past_key_values.${i}.key`] = emptyPast; noPast[`past_key_values.${i}.value`] = emptyPast; }
+    const emptyV = T_("float32", new Float32Array(0), [1, 8, 0, 128]);
+    const emptyK = this.fused ? T_("float32", new Float32Array(0), [1, 8, 128, 0]) : emptyV;     // fused graph keeps K transposed
+    const noPast = {}; for (let i = 0; i < NL; i++) { noPast[`past_key_values.${i}.key`] = emptyK; noPast[`past_key_values.${i}.value`] = emptyV; }
     const posFull = BigInt64Array.from({ length: Sc }, (_, i) => BigInt(i));
     const posUnc = BigInt64Array.from({ length: Tu }, (_, i) => BigInt(i));
     const posStep = BigInt64Array.from({ length: Tu }, (_, i) => BigInt(t0 + i));
-    const fullMask = T_("bool", blockMask(Lc, Sc), [1, 1, Sc, Sc]);
-    const uncMask = T_("bool", blockMask(T, Tu), [1, 1, Tu, Tu]);
+    const maskT = (m, Q, Lcols) => this.fused ? { attention_bias: T_("float32", biasFrom(m, Q, Lcols), [1, 1, 2 * Q, Lcols]) }
+                                                : { attention_mask: T_("bool", m, [1, 1, Q, Lcols]) };
+    const fullMask = maskT(blockMask(Lc, Sc), Sc, Sc);
+    const uncMask = maskT(blockMask(T, Tu), Tu, Tu);
     const stepMaskArr = new Uint8Array(Tu * (Sc + Tu));                      // [Tu, Sc+Tu]
     for (let r = 0; r < T; r++) { stepMaskArr.fill(1, r * (Sc + Tu), r * (Sc + Tu) + t0); stepMaskArr.fill(1, r * (Sc + Tu) + Sc, r * (Sc + Tu) + Sc + T); }
     for (let r = T; r < Tu; r++) stepMaskArr[r * (Sc + Tu) + Sc + r] = 1;    // pads: diagonal only
-    const stepMask = T_("bool", stepMaskArr, [1, 1, Tu, Sc + Tu]);
+    const stepMask = maskT(stepMaskArr, Tu, Sc + Tu);
 
     const post = guidance !== 0 ? this.postCfg : this.postNoCfg;
     const t0T = (v) => T_("int64", BigInt64Array.of(BigInt(v)), [1]);
@@ -128,17 +139,17 @@ export class OmniVoiceKV {
       let cLog, condT0, isFull = false;
       if (s === 0 || (refresh > 0 && s % refresh === 0)) {          // full pass: refreshes the prefix K/V cache
         disposePast();
-        const out = await this.lm.run({ inputs_embeds: T_("float32", fullEmb, [1, Sc, H]), attention_mask: fullMask,
+        const out = await this.lm.run({ inputs_embeds: T_("float32", fullEmb, [1, Sc, H]), ...fullMask,
                                         position_ids: T_("int64", posFull, [1, Sc]), ...noPast });
         cLog = out.logits; condT0 = t0; isFull = true; past = {};
         for (let i = 0; i < NL; i++) for (const kv of ["key", "value"]) past[`past_key_values.${i}.${kv}`] = out[`present.${i}.${kv}`];
       } else {                                                       // target-only pass against the cached prefix
-        cLog = (await this.lm.run({ inputs_embeds: T_("float32", tgtEmb, [1, Tu, H]), attention_mask: stepMask,
+        cLog = (await this.lm.run({ inputs_embeds: T_("float32", tgtEmb, [1, Tu, H]), ...stepMask,
                                     position_ids: T_("int64", posStep, [1, Tu]), ...past }, ["logits"])).logits;
         condT0 = 0;
       }
       let uLog = null;
-      if (guidance !== 0) uLog = (await this.lm.run({ inputs_embeds: T_("float32", tgtEmb, [1, Tu, H]), attention_mask: uncMask,
+      if (guidance !== 0) uLog = (await this.lm.run({ inputs_embeds: T_("float32", tgtEmb, [1, Tu, H]), ...uncMask,
                                                       position_ids: T_("int64", posUnc, [1, Tu]), ...noPast }, ["logits"])).logits;
       const m1 = performance.now();
       const o = await post.run(uLog ? { cond: cLog, uncond: uLog, t0: t0T(condT0), g: gT } : { cond: cLog, t0: t0T(condT0), tlen: tlenT });

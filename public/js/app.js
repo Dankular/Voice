@@ -52,7 +52,7 @@ async function loadModels() {
     const kvBase = new URLSearchParams(location.search).get("kv") || undefined;
     try {                                        // fast engine: cached prefix + 4-bit LM (needs the files from export/build_all.sh)
       omni = await (await import("./load_kv.js")).loadKV({ kvBase, onStatus: status });
-      engineName = "cached-prefix 4-bit";
+      engineName = omni.fused ? "cached-prefix, fused 4-bit" : "cached-prefix 4-bit";
     } catch (e) {                                // fall back to the slower full-recompute engine
       console.warn("fast engine unavailable, falling back:", e);
       $("err").textContent = "Fast engine files not found — using the slower fallback engine. (" + (e.message || e) + ")";

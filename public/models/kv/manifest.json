@@ -38,6 +38,13 @@
    "parts": [
     "embed_audio.bin"
    ]
+  },
+  "lm_fused.onnx": {
+   "size": 2261010,
+   "sha256": "5d11f254b2009724df4b9edd01a032cf3406544334828f675620d981fb943c60",
+   "parts": [
+    "lm_fused.onnx"
+   ]
   }
  }
 }

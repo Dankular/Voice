@@ -43,7 +43,22 @@ voice sample, recomputed every step.
   history; moving the files to a Hugging Face repo later would not remove them from history.
 - If the new model files are not reachable, the app falls back to the old (slow) engine and says so.
 
-**Projection, not a measurement:** from the old per-step timings, a 1.7 s chunk should drop from ~32 s to a few seconds on the
+**Measured by the user (WebGPU, cached-prefix engine, traced graph):** 1.9 s audio in 1.3 s (RTF 0.67) and 1.5 s in 1.2 s (RTF 0.81);
+full pass 150–220 ms, later steps ≈ 80–110 ms LM + 13–35 ms post — nearly independent of token count (full pass over 256–320 tokens
+costs only ~1.5–2× a step over ~40), i.e. the GPU is waiting on per-op dispatch, not computing.
+
+**Fused graph** (`export/build_fused.py`, `public/models/kv/lm_fused.onnx`, 2.2 MB; shares the existing 4-bit weight file):
+the traced graph has 3250 kernel launches per forward (RMSNorm, RoPE, attention, SiLU spelled out as tiny ops + shape ops). The
+hand-built graph uses SimplifiedLayerNormalization / SkipSimplifiedLayerNormalization, contrib RotaryEmbedding, MatMulNBits,
+grouped-query attention without K/V head repeats (WebGPU's fused attention ops don't support custom masks/past), an additive
+float attention bias, a transposed K cache, and no Shape/Cast ops: **759 launches** (≈4.3× fewer). Verified on CPU: logits match the
+traced graph to 1.3e-4 (scale 134) with MatMulNBits activation quantisation off, 100% argmax agreement, full and cached-step;
+JS engine on it: 3/3 prompts exact (Whisper). The loader tries it first and falls back to the traced graph if session creation or
+the warm-up run throws. **Not verified:** that it runs correctly and faster on WebGPU (a silent wrong result would not be caught
+by the fallback — listen to the output), and the expected gain (≈4× fewer launches) is a projection from the dispatch-bound
+timings, not a measurement.
+
+**Earlier projection, not a measurement:** from the old per-step timings, a 1.7 s chunk should drop from ~32 s to a few seconds on the
 same GPU, i.e. RTF in the low single digits, approaching/under 1 for longer chunks and faster GPUs. Real time on every GPU is
 not guaranteed. Measure with the on-page readout.
 
