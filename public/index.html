@@ -24,6 +24,10 @@
   .seg .meta{color:var(--mut);font-size:.85rem;margin-bottom:6px} .seg audio{width:100%}
   .seg a{margin-right:12px;font-size:.9rem;color:var(--acc)}
   #err{color:#dc2626}
+  #tts select,#tts textarea{font:inherit;padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);max-width:100%}
+  #tts textarea{width:100%;box-sizing:border-box;margin-bottom:8px}
+  #tts label{display:inline-flex;flex-direction:column;font-size:.85rem;color:var(--mut);margin:0 12px 10px 0}
+  #tts audio{width:100%;margin-top:10px} hr{border:0;border-top:1px solid var(--line);margin:28px 0}
 </style>
 </head>
 <body>
@@ -48,6 +52,20 @@
   </div>
   <div id="err"></div>
   <div id="segs"></div>
+  <hr>
+  <section id="tts">
+    <h1>Voice design TTS</h1>
+    <p class="sub">Pick attributes, get a generated voice from OmniVoice (voice design, no reference audio). Unset filters are left for the model to choose. There is no documented emotion control: "tone" here means pitch, plus the whisper style.</p>
+    <textarea id="t-text" rows="3" maxlength="300">Hello, this is a test of voice design.</textarea>
+    <div id="t-filters"></div>
+    <div class="row">
+      <label><input type="checkbox" id="t-whisper"> Whisper</label>
+      <button id="t-go" class="primary">Generate</button>
+      <span id="t-status" style="color:var(--mut)"></span>
+    </div>
+    <div id="t-err" style="color:#dc2626"></div>
+    <audio id="t-audio" controls hidden></audio>
+  </section>
 </main>
 
 <script src="vendor/ort.wasm.min.js"></script>
@@ -117,6 +135,27 @@ async function stop() {
 }
 $("toggle").onclick = () => vad_ ? stop() : start();
 $("clear").onclick = () => { $("segs").innerHTML = ""; urls.forEach(URL.revokeObjectURL); urls = []; n = 0; };
+
+// ---- Voice design TTS ----
+const FILTERS = [["gender","Gender"],["age","Age"],["pitch","Tone (pitch)"],["accent","Accent (English)"],["dialect","Dialect (Chinese)"]];
+fetch("/api/attributes").then(r => r.json()).then(attrs => {
+  $("t-filters").innerHTML = FILTERS.map(([k, label]) =>
+    `<label>${label}<select data-k="${k}"><option value="">Any</option>` +
+    attrs[k].map(v => `<option>${v}</option>`).join("") + `</select></label>`).join("");
+}).catch(() => { $("t-err").textContent = "TTS API unavailable on this host."; $("t-go").disabled = true; });
+
+$("t-go").onclick = async () => {
+  const body = { text: $("t-text").value, whisper: $("t-whisper").checked };
+  document.querySelectorAll("#t-filters select").forEach(s => { if (s.value) body[s.dataset.k] = s.value; });
+  $("t-err").textContent = ""; $("t-go").disabled = true; $("t-status").textContent = "generating… (first request loads the model)";
+  try {
+    const r = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    const a = $("t-audio"); a.src = URL.createObjectURL(await r.blob()); a.hidden = false; a.play();
+    $("t-status").textContent = "";
+  } catch (e) { $("t-err").textContent = String(e.message || e); $("t-status").textContent = ""; }
+  $("t-go").disabled = false;
+};
 </script>
 </body>
 </html>

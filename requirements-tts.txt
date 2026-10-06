@@ -1,0 +1,7 @@
+numpy
+onnxruntime
+tokenizers
+soundfile
+huggingface_hub
+fastapi
+uvicorn[standard]

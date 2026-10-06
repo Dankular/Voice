@@ -2,17 +2,11 @@
   "name": "omnivoice-client-vad",
   "version": "1.0.0",
   "private": true,
-  "description": "Client-side Silero VAD (via @ricky0123/vad-web) companion for onnx-community/OmniVoice-Onnx, served by a small Express app",
+  "description": "Build-time fetch of the Silero VAD browser assets (@ricky0123/vad-web) into public/vendor",
   "type": "module",
-  "scripts": {
-    "vendor": "node scripts/vendor.mjs",
-    "postinstall": "node scripts/vendor.mjs",
-    "start": "node server.js"
-  },
-  "engines": { "node": ">=18" },
+  "scripts": { "vendor": "node scripts/vendor.mjs" },
   "dependencies": {
     "@ricky0123/vad-web": "0.0.31",
-    "express": "^4.21.0",
     "onnxruntime-web": "1.22.0"
   }
 }

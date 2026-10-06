@@ -1,9 +1,13 @@
 services:
   - type: web
-    name: omnivoice-client-vad
-    runtime: node
-    plan: free
-    buildCommand: npm ci
-    startCommand: npm start
+    name: omnivoice-voice-design
+    runtime: docker
+    # Memory needed by the int4 model has NOT been measured yet; the free/starter
+    # 512 MB tiers are very likely too small. Adjust after measuring.
+    plan: standard
     healthCheckPath: /healthz
     autoDeploy: true
+    disk:
+      name: omnivoice-models
+      mountPath: /data
+      sizeGB: 2

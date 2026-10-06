@@ -1,27 +1,31 @@
-# OmniVoice client-side VAD
+# OmniVoice voice design + client-side VAD
 
-Browser-side voice activity detection to accompany
-[onnx-community/OmniVoice-Onnx](https://huggingface.co/onnx-community/OmniVoice-Onnx).
+Web service around [onnx-community/OmniVoice-Onnx](https://huggingface.co/onnx-community/OmniVoice-Onnx):
 
-- VAD: [Silero VAD](https://github.com/snakers4/silero-vad) through
-  [`@ricky0123/vad-web`](https://www.npmjs.com/package/@ricky0123/vad-web) (ONNX Runtime Web, WASM).
-  All inference is in the browser; the server only serves static files.
-- The page captures mic speech segments and exports them as WAV (16 kHz and 24 kHz), e.g. as a trimmed
-  `--ref_audio` clip for OmniVoice voice cloning.
-- Not verified: what sample rate the OmniVoice/Higgs encoders expect for reference audio (the model card
-  only states 24 kHz *output*). Check `inference.py` / `higgs_inference.py` in the model repo.
-- This repo does not run OmniVoice itself.
+- **Client-side VAD** (browser): Silero VAD via `@ricky0123/vad-web`; captures speech segments, exports WAV.
+- **Voice-design TTS** (server, CPU, ONNX Runtime): filter by gender, age, pitch ("tone"), whisper, English accent,
+  Chinese dialect. The vocabulary is the one documented upstream (k2-fsa/OmniVoice `docs/voice-design.md`);
+  upstream documents no emotion control, so "tone" = pitch (+ whisper).
+- `get_voices.py` (ElevenLabs library dump) gains a `tts` subcommand; existing usage is unchanged.
 
-## Run locally
+Not implemented: voice cloning, upstream's pydub silence removal, long-text chunking. Model licence is CC-BY-NC
+(per the k2-fsa/OmniVoice card), which matters for hosting a public service.
 
+## CLI
 ```bash
-npm install     # postinstall copies VAD/ORT assets into public/vendor
-npm start       # http://localhost:3000
+pip install -r requirements-tts.txt
+./get_voices.py tts --list-attributes
+./get_voices.py tts --text "Hello" --gender female --pitch "low pitch" --accent "british accent" -o out.wav
 ```
+Models (~430 MB) download on first use to `$OMNIVOICE_HOME` (default `~/.cache/omnivoice-onnx`).
 
-Microphone access needs HTTPS or localhost (Render provides HTTPS).
+## Run the service
+```bash
+npm ci --ignore-scripts && node scripts/vendor.mjs   # browser VAD assets -> public/vendor
+uvicorn app:app --port 10000
+```
+API: `GET /api/attributes`, `POST /api/tts` (JSON -> audio/wav), `GET /healthz`.
 
-## Deploy on Render
-
-`render.yaml` defines a Node web service (`npm ci` → `npm start`, health check `/healthz`).
-In Render: New → Blueprint → select this repo.
+## Render
+`render.yaml` is a Docker web service with a persistent disk for the model cache. The Docker build and the
+Render deploy have **not** been run.
