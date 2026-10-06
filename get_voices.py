@@ -8,8 +8,8 @@ Examples:
   ELEVENLABS_API_KEY=... ./get_voices.py --use-case social_media -o voices.csv
   ./get_voices.py --search narrator --max 200 --format json -o narrators.json
 
-Local OmniVoice voice-design TTS (see README):
-  ./get_voices.py tts --text "Hello" --gender female --pitch low --accent "british accent" -o out.wav
+Speak text in a voice (sample transcribed on the fly, cloned with OmniVoice):
+  ./get_voices.py tts --sample https://.../preview.mp3 --text "Hello there" -o out.wav
 """
 import argparse, csv, json, os, sys, time
 import urllib.error, urllib.parse, urllib.request
@@ -76,45 +76,32 @@ def iter_saved(key, voice_type, page_size, limit):
 
 
 def tts_main(argv):
-    """`get_voices.py tts ...` - local OmniVoice (ONNX) voice-design TTS."""
-    from omnivoice_tts.attributes import FACETS, build_instruct
-
-    ap = argparse.ArgumentParser(prog="get_voices.py tts",
-                                 description="Synthesise speech with OmniVoice voice design. "
-                                             "Attribute choices come from the upstream-documented vocabulary.")
-    ap.add_argument("--text", help="text to speak")
-    ap.add_argument("--gender", choices=FACETS["gender"])
-    ap.add_argument("--age", choices=FACETS["age"])
-    ap.add_argument("--pitch", choices=FACETS["pitch"], help="the closest documented control to 'tone'")
-    ap.add_argument("--whisper", action="store_true")
-    ap.add_argument("--accent", choices=FACETS["accent"], help="English speech only")
-    ap.add_argument("--dialect", choices=FACETS["dialect"], help="Chinese speech only")
-    ap.add_argument("--instruct", help="raw instruct string (overrides the attribute flags)")
-    ap.add_argument("--language", help="language id or name, e.g. en / English (default: auto)")
+    """`get_voices.py tts ...` - speak text in a voice: the sample is transcribed on the fly (ONNX Whisper)
+    and cloned with OmniVoice (ONNX). Sample = a local file or an https URL, e.g. a preview_url from this tool."""
+    ap = argparse.ArgumentParser(prog="get_voices.py tts")
+    ap.add_argument("--sample", required=True, help="voice sample: file path or https URL (e.g. a preview_url)")
+    ap.add_argument("--text", required=True)
+    ap.add_argument("--ref-text", help="transcript of the sample (default: transcribed automatically)")
+    ap.add_argument("--language")
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--seed", type=int)
-    ap.add_argument("--model-dir", help="dir with the int4 backbone (default: download to cache)")
-    ap.add_argument("--higgs-dir", help="dir with higgs_decoder.onnx (default: download to cache)")
-    ap.add_argument("--list-attributes", action="store_true")
     ap.add_argument("-o", "--output", default="out.wav")
     a = ap.parse_args(argv)
 
-    if a.list_attributes:
-        for k, v in FACETS.items():
-            print(f"{k}: {', '.join(v)}")
-        return
-    if not a.text:
-        ap.error("--text is required")
-    instruct = a.instruct or build_instruct(a.gender, a.age, a.pitch, "whisper" if a.whisper else None,
-                                            a.accent, a.dialect)
-    from omnivoice_tts.engine import SAMPLE_RATE, OmniVoiceONNX
-    from omnivoice_tts.models import ensure_models
+    if a.sample.startswith("https://"):
+        with urllib.request.urlopen(a.sample, timeout=30) as r:
+            data = r.read()
+    else:
+        data = open(a.sample, "rb").read()
     import soundfile as sf
-    model_dir, higgs_dir = (a.model_dir, a.higgs_dir) if a.model_dir and a.higgs_dir else ensure_models()
-    wav = OmniVoiceONNX(model_dir, higgs_dir).synthesize(
-        a.text, instruct, a.language, speed=a.speed, seed=a.seed)
+    from omnivoice_tts.engine import SAMPLE_RATE
+    from omnivoice_tts.models import load_cloner
+    cloner = load_cloner()
+    ref = cloner.prepare(data, ref_text=a.ref_text)
+    print(f"sample transcript: {ref.text!r}", file=sys.stderr)
+    wav = cloner.speak(a.text, ref, a.language, a.speed, a.seed)
     sf.write(a.output, wav, SAMPLE_RATE)
-    print(f"wrote {a.output} ({len(wav) / SAMPLE_RATE:.2f}s) instruct={instruct!r}", file=sys.stderr)
+    print(f"wrote {a.output} ({len(wav) / SAMPLE_RATE:.2f}s)", file=sys.stderr)
 
 
 def main():

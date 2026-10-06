@@ -10,6 +10,12 @@ mkdirSync(out, { recursive: true });
 
 const vad = join(root, "node_modules/@ricky0123/vad-web/dist");
 const ort = join(root, "node_modules/onnxruntime-web/dist");
+const ortGpu = join(root, "node_modules/ort-webgpu/dist");   // onnxruntime-web 1.30 (WebGPU) for OmniVoice
+mkdirSync(join(out, "ort"), { recursive: true });
+for (const f of ["ort.webgpu.min.mjs", "ort-wasm-simd-threaded.asyncify.mjs", "ort-wasm-simd-threaded.asyncify.wasm"]) {
+  if (!existsSync(join(ortGpu, f))) throw new Error(`missing ${join(ortGpu, f)}`);
+  cpSync(join(ortGpu, f), join(out, "ort", f));
+}
 
 const files = [
   [vad, "bundle.min.js"],

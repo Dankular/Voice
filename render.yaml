@@ -1,13 +1,10 @@
 services:
   - type: web
-    name: omnivoice-voice-design
+    name: omnivoice-voices
     runtime: docker
-    # Memory needed by the int4 model has NOT been measured yet; the free/starter
-    # 512 MB tiers are very likely too small. Adjust after measuring.
-    plan: standard
+    plan: free            # nothing heavy runs server-side
     healthCheckPath: /healthz
     autoDeploy: true
-    disk:
-      name: omnivoice-models
-      mountPath: /data
-      sizeGB: 2
+    envVars:
+      - key: ELEVENLABS_API_KEY
+        sync: false       # set in the Render dashboard

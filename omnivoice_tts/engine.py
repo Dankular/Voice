@@ -23,12 +23,12 @@ from typing import Optional
 
 import numpy as np
 
-from .attributes import ZH_RE, resolve_instruct
 from .duration import RuleDurationEstimator
 
 SAMPLE_RATE = 24_000
 NUM_CODEBOOKS = 8
 MASK_ID = 1024
+HOP = 960
 _ORT2NP = {"tensor(float)": np.float32, "tensor(float16)": np.float16}
 
 _NONVERBAL = re.compile(
@@ -38,8 +38,9 @@ _NONVERBAL = re.compile(
 )
 
 
-def _combine_text(text: str) -> str:
-    t = re.sub(r"[\r\n]+", "", text.strip())
+def _combine_text(text: str, ref_text: Optional[str] = None) -> str:
+    t = (ref_text.strip() + " " + text.strip()) if ref_text else text.strip()
+    t = re.sub(r"[\r\n]+", "", t)
     t = t.replace("（", "(").replace("）", ")")
     t = re.sub(r"[ \t]+", " ", t)
     cjk = r"[一-鿿]"
@@ -121,29 +122,42 @@ class OmniVoiceONNX:
         position_temperature: float = 5.0,
         speed: float = 1.0,
         seed: Optional[int] = None,
+        ref_tokens: Optional[np.ndarray] = None,
+        ref_text: Optional[str] = None,
+        ref_rms: Optional[float] = None,
     ) -> np.ndarray:
-        """Return a float32 mono waveform at 24 kHz."""
+        """Return a float32 mono waveform at 24 kHz.
+
+        Voice cloning: pass ``ref_tokens`` (8, Tr) from :meth:`encode_reference` and its transcript ``ref_text``.
+        """
         if not text or not text.strip():
             raise ValueError("text is empty")
         rng = np.random.default_rng(seed)
-        instruct = resolve_instruct(instruct, use_zh=bool(ZH_RE.search(text)))
 
         # target length (upstream falls back to this reference when there is no ref audio)
-        T = max(1, int(self.estimator.estimate_duration(text, "Nice to meet you.", 25)))
+        Tr = 0 if ref_tokens is None else int(ref_tokens.shape[-1])
+        if Tr and ref_text:
+            T = max(1, int(self.estimator.estimate_duration(text, ref_text, Tr)))
+        else:  # upstream's fallback when there is no usable reference
+            T = max(1, int(self.estimator.estimate_duration(text, "Nice to meet you.", 25)))
         if speed > 0 and speed != 1.0:
             T = max(1, int(T / speed))
 
-        style = (
+        style = ("<|denoise|>" if Tr else "") + (
             f"<|lang_start|>{language or 'None'}<|lang_end|>"
             f"<|instruct_start|>{instruct or 'None'}<|instruct_end|>"
         )
-        prefix = self._ids(style) + self._text_ids(f"<|text_start|>{_combine_text(text)}<|text_end|>")
-        c_len = len(prefix) + T
+        prefix = self._ids(style) + self._text_ids(
+            f"<|text_start|>{_combine_text(text, ref_text if Tr else None)}<|text_end|>")
+        c_len = len(prefix) + Tr + T
+        t0 = len(prefix) + Tr          # start of the target region
 
         cond = np.full((1, NUM_CODEBOOKS, c_len), MASK_ID, dtype=np.int64)
         cond[0, :, : len(prefix)] = np.asarray(prefix, dtype=np.int64)[None, :]
         cond_mask = np.zeros((1, c_len), dtype=bool)
-        cond_mask[0, len(prefix):] = True
+        if Tr:
+            cond[0, :, len(prefix):t0] = ref_tokens
+        cond_mask[0, len(prefix):] = True   # reference + target positions are audio (upstream)
         unc = np.full((1, NUM_CODEBOOKS, T), MASK_ID, dtype=np.int64)
         unc_mask = np.ones((1, T), dtype=bool)
 
@@ -163,7 +177,7 @@ class OmniVoiceONNX:
             k = sched[s]
             if k <= 0:
                 continue
-            c_logits = self._forward(cond, cond_mask)[0, :, len(prefix):, :]  # (8,T,1025)
+            c_logits = self._forward(cond, cond_mask)[0, :, t0:, :]  # (8,T,1025)
             if guidance_scale != 0:
                 u_logits = self._forward(unc, unc_mask)[0, :, :T, :]
                 cl, ul = _log_softmax(c_logits), _log_softmax(u_logits)
@@ -181,10 +195,10 @@ class OmniVoiceONNX:
             flat = tokens.ravel()
             flat[top] = pred.ravel()[top]
             tokens = flat.reshape(NUM_CODEBOOKS, T)
-            cond[0, :, len(prefix):] = tokens
+            cond[0, :, t0:] = tokens
             unc[0] = tokens
 
-        return _post_process(self._decode(tokens))
+        return _post_process(self._decode(tokens), ref_rms=ref_rms)
 
     def _decode(self, tokens: np.ndarray) -> np.ndarray:
         """(8, T) codes -> float32 waveform at 24 kHz."""
@@ -196,11 +210,17 @@ def _log_softmax(x: np.ndarray) -> np.ndarray:
     return x - np.log(np.exp(x).sum(-1, keepdims=True))
 
 
-def _post_process(wav: np.ndarray, pad_s: float = 0.1, fade_s: float = 0.1) -> np.ndarray:
-    """Peak-normalise to 0.5, then fade and pad (as upstream does when there is no ref audio)."""
-    peak = float(np.abs(wav).max()) if wav.size else 0.0
-    if peak > 1e-6:
-        wav = wav / peak * 0.5
+def _post_process(wav: np.ndarray, ref_rms: Optional[float] = None, pad_s: float = 0.1,
+                  fade_s: float = 0.1) -> np.ndarray:
+    """Upstream post-processing minus silence removal: scale to the reference loudness if it was quiet,
+    peak-normalise to 0.5 when there is no reference, then fade and pad."""
+    if ref_rms is not None:
+        if ref_rms < 0.1:
+            wav = wav * ref_rms / 0.1
+    else:
+        peak = float(np.abs(wav).max()) if wav.size else 0.0
+        if peak > 1e-6:
+            wav = wav / peak * 0.5
     k = min(int(fade_s * SAMPLE_RATE), wav.size // 2)
     if k > 0:
         wav = wav.copy()
@@ -248,3 +268,18 @@ class OmniVoiceUnified(OmniVoiceONNX):
 
     def _decode(self, tokens):
         return self.decoder.run(["audio"], {"audio_codes": tokens[None]})[0].reshape(-1).astype(np.float32)
+
+    def encode_reference(self, wav24k: np.ndarray):
+        """Reference waveform (24 kHz mono float32) -> (codes (8, Tr), rms). Mirrors upstream's prompt prep
+        except silence removal / long-clip trimming (callers should pass <= ~20 s)."""
+        if self.encoder is None:
+            raise RuntimeError("no encoder_dir given; voice cloning unavailable")
+        wav = np.asarray(wav24k, dtype=np.float32).reshape(-1)
+        rms = float(np.sqrt(np.mean(wav ** 2)))
+        if 0 < rms < 0.1:
+            wav = wav * 0.1 / rms
+        # codec hop is 960 samples (25 fps; measured). Lengths that aren't a multiple make the encoder fail
+        # (acoustic/semantic frame mismatch), so clip like upstream does.
+        wav = wav[: len(wav) // HOP * HOP]
+        codes = self.encoder.run(["audio_codes"], {"audio": wav[None, None, :]})[0][0]
+        return codes.astype(np.int64), rms

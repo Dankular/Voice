@@ -1,67 +1,37 @@
-"""Web service: static VAD page + OmniVoice voice-design TTS API.
+"""Static hosting + a thin ElevenLabs proxy. All speech models run in the browser (see public/js).
 
-  GET  /healthz         liveness (does not load the model)
-  GET  /api/attributes  filter vocabulary (gender, age, pitch, style, accent, dialect)
-  POST /api/tts         JSON {text, gender?, age?, pitch?, whisper?, accent?, dialect?, language?, speed?, seed?}
-                        -> audio/wav (24 kHz, mono)
+  GET /api/voices?gender=&accent=&age=&language=&use_case=&search=&page=   shared-voice library (names etc.)
+  GET /api/preview/{voice_id}                                              the voice's sample audio (same-origin)
+  GET /healthz
+
+Needs ELEVENLABS_API_KEY on the server; it never reaches the browser.
 """
 import asyncio
-import io
 import os
-import threading
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
-import soundfile as sf
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
 
-from omnivoice_tts.attributes import FACETS, build_instruct
-from omnivoice_tts.engine import SAMPLE_RATE, OmniVoiceONNX
-from omnivoice_tts.models import ensure_models
+from get_voices import fetch_page
 
-MAX_CHARS = int(os.environ.get("TTS_MAX_CHARS", "300"))
-THREADS = int(os.environ.get("TTS_THREADS", "0"))
+MAX_PREVIEW_BYTES = 8 * 1024 * 1024
+# fields beyond the first four are not verified against a live response (no API key in the dev sandbox)
+LIST_KEYS = ["voice_id", "name", "description", "preview_url", "gender", "accent", "age", "descriptive",
+             "use_case", "language", "category"]
 
-app = FastAPI(title="OmniVoice voice design")
-_engine: Optional[OmniVoiceONNX] = None
-_lock = threading.Lock()  # one synthesis at a time; the model is CPU-bound
+app = FastAPI(title="OmniVoice voices")
+_previews: dict = {}   # voice_id -> preview_url, filled only from library responses (clients can't pick URLs)
 
 
-def get_engine() -> OmniVoiceONNX:
-    global _engine
-    if _engine is None:
-        model_dir = os.environ.get("OMNIVOICE_MODEL_DIR")
-        higgs_dir = os.environ.get("OMNIVOICE_HIGGS_DIR")
-        if not (model_dir and higgs_dir):
-            model_dir, higgs_dir = ensure_models()
-        _engine = OmniVoiceONNX(model_dir, higgs_dir, num_threads=THREADS)
-    return _engine
-
-
-class TTSRequest(BaseModel):
-    text: str = Field(min_length=1)
-    gender: Optional[str] = None
-    age: Optional[str] = None
-    pitch: Optional[str] = None
-    whisper: bool = False
-    accent: Optional[str] = None
-    dialect: Optional[str] = None
-    language: Optional[str] = None
-    speed: float = Field(1.0, gt=0.25, lt=4)
-    seed: Optional[int] = None
-
-
-def _synthesize(req: TTSRequest) -> bytes:
-    instruct = build_instruct(req.gender, req.age, req.pitch, "whisper" if req.whisper else None,
-                              req.accent, req.dialect)
-    with _lock:
-        wav = get_engine().synthesize(req.text, instruct, req.language, speed=req.speed, seed=req.seed)
-    buf = io.BytesIO()
-    sf.write(buf, wav, SAMPLE_RATE, format="WAV", subtype="PCM_16")
-    return buf.getvalue()
+def _key() -> str:
+    k = os.environ.get("ELEVENLABS_API_KEY")
+    if not k:
+        raise HTTPException(503, "ELEVENLABS_API_KEY is not set on the server")
+    return k
 
 
 @app.get("/healthz")
@@ -69,20 +39,45 @@ def healthz():
     return "ok"
 
 
-@app.get("/api/attributes")
-def attributes():
-    return FACETS
-
-
-@app.post("/api/tts")
-async def tts(req: TTSRequest):
-    if len(req.text) > MAX_CHARS:
-        raise HTTPException(413, f"text too long (max {MAX_CHARS} characters)")
+@app.get("/api/voices")
+async def voices(gender: Optional[str] = None, accent: Optional[str] = None, age: Optional[str] = None,
+                 language: Optional[str] = None, use_case: Optional[str] = None, search: Optional[str] = None,
+                 page: int = 0, page_size: int = Query(24, le=100)):
+    params = {"gender": gender, "accent": accent, "age": age, "language": language, "use_cases": use_case,
+              "search": search, "page": page, "page_size": page_size}
     try:
-        data = await asyncio.get_running_loop().run_in_executor(None, _synthesize, req)
-    except ValueError as e:  # invalid/conflicting attributes
-        raise HTTPException(422, str(e))
-    return Response(data, media_type="audio/wav")
+        data = await asyncio.get_running_loop().run_in_executor(
+            None, fetch_page, _key(), {k: v for k, v in params.items() if v not in (None, "")})
+    except SystemExit as e:           # fetch_page reports HTTP errors this way
+        raise HTTPException(502, str(e))
+    out = []
+    for v in data.get("voices", []):
+        if v.get("voice_id") and v.get("preview_url"):
+            _previews[v["voice_id"]] = v["preview_url"]
+        out.append({k: v.get(k) for k in LIST_KEYS})
+    return {"voices": out, "has_more": data.get("has_more", False)}
+
+
+def _fetch(url: str) -> bytes:
+    if not url.startswith("https://"):
+        raise ValueError("preview URL must be https")
+    with urllib.request.urlopen(url, timeout=30) as r:
+        data = r.read(MAX_PREVIEW_BYTES + 1)
+    if len(data) > MAX_PREVIEW_BYTES:
+        raise ValueError("preview audio too large")
+    return data
+
+
+@app.get("/api/preview/{voice_id}")
+async def preview(voice_id: str):
+    url = _previews.get(voice_id)
+    if not url:
+        raise HTTPException(404, "unknown voice_id - list voices first")
+    try:
+        data = await asyncio.get_running_loop().run_in_executor(None, _fetch, url)
+    except Exception as e:
+        raise HTTPException(502, f"could not fetch preview: {e}")
+    return Response(data, media_type="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 app.mount("/", StaticFiles(directory=Path(__file__).parent / "public", html=True), name="static")

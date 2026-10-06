@@ -4,9 +4,12 @@
   "private": true,
   "description": "Build-time fetch of the Silero VAD browser assets (@ricky0123/vad-web) into public/vendor",
   "type": "module",
-  "scripts": { "vendor": "node scripts/vendor.mjs" },
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs"
+  },
   "dependencies": {
     "@ricky0123/vad-web": "0.0.31",
-    "onnxruntime-web": "1.22.0"
+    "onnxruntime-web": "1.22.0",
+    "ort-webgpu": "npm:onnxruntime-web@1.30.0"
   }
 }
