@@ -184,8 +184,11 @@ class OmniVoiceONNX:
             cond[0, :, len(prefix):] = tokens
             unc[0] = tokens
 
-        wav = self.decoder.run(["waveform_24k"], {"codes": tokens[:, None, :]})[0].reshape(-1).astype(np.float32)
-        return _post_process(wav)
+        return _post_process(self._decode(tokens))
+
+    def _decode(self, tokens: np.ndarray) -> np.ndarray:
+        """(8, T) codes -> float32 waveform at 24 kHz."""
+        return self.decoder.run(["waveform_24k"], {"codes": tokens[:, None, :]})[0].reshape(-1).astype(np.float32)
 
 
 def _log_softmax(x: np.ndarray) -> np.ndarray:
@@ -205,3 +208,43 @@ def _post_process(wav: np.ndarray, pad_s: float = 0.1, fade_s: float = 0.1) -> n
         wav[-k:] *= np.linspace(1, 0, k, dtype=np.float32)
     pad = np.zeros(int(pad_s * SAMPLE_RATE), dtype=np.float32)
     return np.concatenate([pad, wav, pad])
+
+
+class OmniVoiceUnified(OmniVoiceONNX):
+    """Backend for single-graph exports whose LM takes ``attention_mask[B,1,S,S]`` and ``position_ids``
+    (e.g. ct03/omnivoice-onnx-int8hq: omnivoice_lm_*/model.onnx + audio_tokenizer_decoder_*/model.onnx).
+
+    Unlike the genai-built backbone in onnx-community/OmniVoice-Onnx (causal: verified by perturbation test),
+    this LM attends bidirectionally when given a full-ones mask, as upstream does.
+    """
+
+    def __init__(self, lm_dir, decoder_dir, tokenizer_dir, encoder_dir=None, providers=("CPUExecutionProvider",),
+                 num_threads: int = 0):
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3
+        if num_threads:
+            opts.intra_op_num_threads = num_threads
+
+        def sess(d):
+            return ort.InferenceSession(str(Path(d) / "model.onnx"), sess_options=opts, providers=list(providers))
+
+        self.lm = sess(lm_dir)
+        self.decoder = sess(decoder_dir)
+        self.encoder = sess(encoder_dir) if encoder_dir else None
+        self.tok = Tokenizer.from_file(str(Path(tokenizer_dir) / "tokenizer.json"))
+        self.estimator = RuleDurationEstimator()
+
+    def _forward(self, input_ids, audio_mask):
+        S = input_ids.shape[-1]
+        out = self.lm.run(["logits"], {
+            "input_ids": input_ids, "audio_mask": audio_mask,
+            "attention_mask": np.ones((input_ids.shape[0], 1, S, S), dtype=bool),
+            "position_ids": np.broadcast_to(np.arange(S, dtype=np.int64), (input_ids.shape[0], S)).copy(),
+        })[0]
+        return out.astype(np.float32, copy=False)
+
+    def _decode(self, tokens):
+        return self.decoder.run(["audio"], {"audio_codes": tokens[None]})[0].reshape(-1).astype(np.float32)
