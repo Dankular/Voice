@@ -177,7 +177,7 @@ class OmniVoiceONNX:
             k = sched[s]
             if k <= 0:
                 continue
-            c_logits = self._forward(cond, cond_mask)[0, :, t0:, :]  # (8,T,1025)
+            c_logits = self._cond_logits(cond, cond_mask, t0, s)  # (8,T,1025)
             if guidance_scale != 0:
                 u_logits = self._forward(unc, unc_mask)[0, :, :T, :]
                 cl, ul = _log_softmax(c_logits), _log_softmax(u_logits)
@@ -199,6 +199,10 @@ class OmniVoiceONNX:
             unc[0] = tokens
 
         return _post_process(self._decode(tokens), ref_rms=ref_rms)
+
+    def _cond_logits(self, cond, cond_mask, t0, step):
+        """Logits at the target positions of the conditional pass (hook: subclasses may reuse cached prefix state)."""
+        return self._forward(cond, cond_mask)[0, :, t0:, :]
 
     def _decode(self, tokens: np.ndarray) -> np.ndarray:
         """(8, T) codes -> float32 waveform at 24 kHz."""
@@ -283,3 +287,72 @@ class OmniVoiceUnified(OmniVoiceONNX):
         wav = wav[: len(wav) // HOP * HOP]
         codes = self.encoder.run(["audio_codes"], {"audio": wav[None, None, :]})[0][0]
         return codes.astype(np.int64), rms
+
+
+class OmniVoiceKV(OmniVoiceUnified):
+    """Same decoding as OmniVoiceUnified, but the LM is the single KV-exposing graph from export/export_kv.py
+    (fp32 or MatMulNBits-quantized). The prefix (style + text + reference) K/V is computed once in a full pass at
+    step 0; later steps run only the target positions against it (target K/V columns from the full pass are masked).
+    Embedding lookups happen here (numpy) from the tables written by the exporter.
+    """
+
+    def __init__(self, lm_path, tables_dir, decoder_dir, tokenizer_dir, encoder_dir=None, num_threads: int = 0):
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3
+        if num_threads:
+            opts.intra_op_num_threads = num_threads
+        d = Path(tables_dir)
+        self.lm = ort.InferenceSession(str(lm_path), sess_options=opts, providers=["CPUExecutionProvider"])
+        self.decoder = ort.InferenceSession(str(Path(decoder_dir) / "model.onnx"), sess_options=opts,
+                                            providers=["CPUExecutionProvider"])
+        self.encoder = (ort.InferenceSession(str(Path(encoder_dir) / "model.onnx"), sess_options=opts,
+                                             providers=["CPUExecutionProvider"]) if encoder_dir else None)
+        self.tok = Tokenizer.from_file(str(Path(tokenizer_dir) / "tokenizer.json"))
+        self.estimator = RuleDurationEstimator()
+        self.txt_i8 = np.load(d / "embed_text_int8.npy")
+        self.txt_sc = np.load(d / "embed_text_scale.npy")
+        self.aud = np.load(d / "embed_audio_f32.npy")
+        self._past = None
+        self._out_names = [o.name for o in self.lm.get_outputs()]
+        self.n_full = self.n_step = 0
+
+    def _embed(self, ids, audio_mask):                       # ids (1,8,S) int64, audio_mask (1,S) bool -> (1,S,1024)
+        ids, am = ids[0], audio_mask[0]
+        out = self.txt_i8[ids[0]].astype(np.float32) * self.txt_sc[ids[0]][:, None]
+        off = (np.arange(NUM_CODEBOOKS) * 1025)[:, None]
+        aud = self.aud[ids * am[None, :] + off].sum(axis=0)   # non-audio ids zeroed first, as upstream (S, 1024)
+        return np.where(am[:, None], aud, out)[None].astype(np.float32)
+
+    def _run(self, embeds, mask, pos, past):
+        empty = np.zeros((1, 8, 0, 128), np.float32)
+        feed = {"inputs_embeds": embeds, "attention_mask": mask, "position_ids": pos}
+        for i in range(28):
+            for kv in ("key", "value"):
+                feed[f"past_key_values.{i}.{kv}"] = past[f"{i}.{kv}"] if past else empty
+        return self.lm.run(None, feed)
+
+    def _forward(self, ids, audio_mask):                     # no-cache pass (unconditional branch)
+        S = ids.shape[-1]
+        return self._run(self._embed(ids, audio_mask), np.ones((1, 1, S, S), bool),
+                         np.arange(S, dtype=np.int64)[None], None)[0]
+
+    def _cond_logits(self, cond, cond_mask, t0, step):
+        S = cond.shape[-1]
+        if step == 0 or self._past is None:                   # full pass: also caches K/V of every position
+            self.n_full += 1
+            out = self._run(self._embed(cond, cond_mask), np.ones((1, 1, S, S), bool),
+                            np.arange(S, dtype=np.int64)[None], None)
+            self._past = {n.replace("present.", ""): v for n, v in zip(self._out_names[1:], out[1:])}
+            self._emb = None
+            return out[0][0, :, t0:, :]
+        self.n_step += 1
+        Tq = S - t0
+        mask = np.zeros((1, 1, Tq, S + Tq), bool)
+        mask[..., :t0] = True                                 # cached prefix columns
+        mask[..., S:] = True                                  # the new target positions
+        out = self._run(self._embed(cond[:, :, t0:], cond_mask[:, t0:]), mask,
+                        np.arange(t0, S, dtype=np.int64)[None], self._past)
+        return out[0][0]

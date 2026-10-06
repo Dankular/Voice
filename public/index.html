@@ -48,9 +48,9 @@
     <div><b id="picked">No voice selected</b></div>
     <textarea id="text" rows="3" maxlength="300" placeholder="Text to speak"></textarea>
     <div class="row">
-      <label>Steps <select id="steps"><option>32</option><option selected>16</option><option>12</option><option>8</option></select></label>
+      <label>Steps <select id="steps"><option>16</option><option>12</option><option selected>8</option><option>6</option></select></label>
       <label>Voice sample <select id="refcap"><option value="5">5 s (can drop words)</option><option value="8">8 s</option><option value="12" selected>12 s</option><option value="20">20 s</option></select></label>
-      <label><input type="checkbox" id="cfg" checked> Guidance (better, ~2× slower)</label>
+      <label><input type="checkbox" id="cfg"> Guidance (may improve quality, ~1.5× slower)</label>
     </div>
     <div class="row"><button id="go" class="primary" disabled>Speak</button><button id="stop" hidden>Stop</button><span id="status"></span></div>
     <div id="perf" class="sub" style="font-size:.85rem"></div>

@@ -2,3 +2,5 @@ node_modules/
 public/vendor/
 __pycache__/
 *.wav
+kv_out/
+*.npy

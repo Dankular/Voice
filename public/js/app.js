@@ -28,7 +28,7 @@ function chunkText(text) {
   return out.length ? out : [text];
 }
 
-let omni = null, transcribe = null, picked = null, page = 0, last = new FormData();
+let engineName = "", omni = null, transcribe = null, picked = null, page = 0, last = new FormData();
 const refs = new Map();   // voice_id -> prepared reference (transcribed + encoded once)
 
 // ---------- models: load at page load ----------
@@ -47,12 +47,20 @@ async function loadModels() {
   if (!("gpu" in navigator)) status("WebGPU", 0, 0, "not available in this browser — falling back to wasm (very slow)");
   try {
     // dynamic imports: the voice list and filters keep working even if the model libraries fail to load
-    const [{ OmniVoice }, { loadAsr }] = await Promise.all([import("./omnivoice.js"), import("./asr.js")]);
-    [omni, transcribe] = await Promise.all([
-      OmniVoice.load({ onStatus: status }),
-      loadAsr({ onProgress: (p) => p.status === "progress" && status("Whisper " + (p.file || ""), p.loaded, p.total) }),
-    ]);
-    $("models").textContent = `Models ready (${omni.providers[0]}).`;
+    const { loadAsr } = await import("./asr.js");
+    const asrP = loadAsr({ onProgress: (p) => p.status === "progress" && status("Whisper " + (p.file || ""), p.loaded, p.total) });
+    const kvBase = new URLSearchParams(location.search).get("kv") || undefined;
+    try {                                        // fast engine: cached prefix + 4-bit LM (needs the files from export/build_all.sh)
+      omni = await (await import("./load_kv.js")).loadKV({ kvBase, onStatus: status });
+      engineName = "cached-prefix 4-bit";
+    } catch (e) {                                // fall back to the slower full-recompute engine
+      console.warn("fast engine unavailable, falling back:", e);
+      $("err").textContent = "Fast engine files not found — using the slower fallback engine. (" + (e.message || e) + ")";
+      omni = await (await import("./omnivoice.js")).OmniVoice.load({ onStatus: status });
+      engineName = "full-recompute int8";
+    }
+    transcribe = await asrP;
+    $("models").textContent = `Models ready — ${engineName} on ${omni.providers[0]}.`;
     updateGo();
   } catch (e) { $("err").textContent = "Model load failed: " + (e.message || e); console.error(e); }
 }
@@ -185,7 +193,7 @@ $("go").onclick = async () => {
       const first = st[0], rest = st.slice(1);
       const avg = (k) => (rest.reduce((a, x) => a + x[k], 0) / Math.max(1, rest.length)).toFixed(0);
       lines.push(`chunk ${i + 1}: ${secs.toFixed(1)} s for ${audio.toFixed(1)} s audio (RTF ${(secs / audio).toFixed(2)}; <1 = faster than real time) · ` +
-        `step 1: ${first.lmMs.toFixed(0)}+${first.postMs.toFixed(0)} ms, later steps avg LM ${avg("lmMs")} + post ${avg("postMs")} + js ${avg("jsMs")} ms · S=${wav.timing.shapes.cond}`);
+        `step 1: ${first.lmMs.toFixed(0)}+${first.postMs.toFixed(0)} ms, later steps avg LM ${avg("lmMs")} + post ${avg("postMs")} + js ${avg("jsMs")} ms · S=${wav.timing.shapes.full ?? wav.timing.shapes.cond}`);
       $("perf").innerHTML = lines.map(esc).join("<br>");
     }
     if (!cancelled) {
