@@ -8,6 +8,19 @@ Web service around [onnx-community/OmniVoice-Onnx](https://huggingface.co/onnx-c
   upstream documents no emotion control, so "tone" = pitch (+ whisper).
 - `get_voices.py` (ElevenLabs library dump) gains a `tts` subcommand; existing usage is unchanged.
 
+## KNOWN ISSUE: output is not intelligible with the onnx-community backbone
+
+Measured, not assumed:
+- `onnx-community/OmniVoice-Onnx`'s `llm_decoder.onnx` is **causal**: changing only the last input position leaves
+  every earlier position's output unchanged (tested on the int4 build). Upstream builds a full-block attention mask,
+  so by reading its code the real model attends bidirectionally (not yet confirmed by running upstream PyTorch).
+- Whisper-base (ONNX, in `omnivoice_tts/asr.py`, which transcribes real speech correctly) cannot recover the text from
+  this engine's output: it returns unrelated phrases / repetition loops.
+- So treat the voice-design output here as **unverified/likely broken**, and the pitch/gender filters as untested.
+- Other exports (e.g. `ct03/omnivoice-onnx-int8hq`) document a 4D `attention_mask` input; being evaluated.
+
+`omnivoice_tts/asr.py` (Whisper on ONNX Runtime, for transcribing reference audio) is verified on a real speech sample.
+
 Not implemented: voice cloning, upstream's pydub silence removal, long-text chunking. Model licence is CC-BY-NC
 (per the k2-fsa/OmniVoice card), which matters for hosting a public service.
 
