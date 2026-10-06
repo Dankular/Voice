@@ -32,17 +32,25 @@ function chunkText(text) {
 let kvMod = null, engineName = "", omni = null, transcribe = null, picked = null, page = 0, last = new FormData();
 const refs = new Map();   // voice_id -> prepared reference (transcribed + encoded once)
 
-// ---------- models: load at page load ----------
-const bars = {};
+// ---------- models: load at page load (a full-screen loading page covers the UI until they are ready) ----------
+const EXPECTED_BYTES = 1190e6;       // ~LM 309 + text emb 155 + audio emb 34 + codec 480 + Whisper ~210 MB; progress is measured against this
+const bars = {}, gotBytes = {};
 function status(label, got, total, note) {
   let row = bars[label];
-  if (!row) {
-    row = bars[label] = document.createElement("div");
-    row.className = "m"; $("models").appendChild(row);
-  }
+  if (!row) { row = bars[label] = document.createElement("div"); $("loadrows").appendChild(row); }
   const pct = total ? Math.round(100 * got / total) : 0;
   row.textContent = `${label}: ${note || (total ? pct + "%" : "loading…")}`;
+  if (total) gotBytes[label] = got;
+  const done = Object.values(gotBytes).reduce((a, b) => a + b, 0);
+  $("loadbar").firstElementChild.style.width = Math.min(99, Math.round(100 * done / EXPECTED_BYTES)) + "%";
+  $("loadstage").textContent = note ? `${label} — ${note}` : (/warm/i.test(label) ? "Compiling GPU kernels…" : `Downloading ${label}…`);
 }
+function loadingDone() {
+  $("loadbar").firstElementChild.style.width = "100%";
+  $("loading").classList.add("done");
+  setTimeout(() => $("loading").remove(), 400);
+}
+$("loaddismiss").onclick = () => $("loading").remove();
 
 async function loadModels() {
   if (!("gpu" in navigator)) status("WebGPU", 0, 0, "not available in this browser — falling back to wasm (very slow)");
@@ -62,10 +70,14 @@ async function loadModels() {
       omni = await (await import("./omnivoice.js")).OmniVoice.load({ onStatus: status });
       engineName = "full-recompute int8";
     }
+    $("loadstage").textContent = "Preparing speech recognition…";
     transcribe = await asrP;
     $("models").textContent = `Models ready — ${engineName} on ${omni.providers[0]}.`;
-    updateGo(); prefetch();
-  } catch (e) { $("err").textContent = "Model load failed: " + (e.message || e); console.error(e); }
+    updateGo(); prefetch(); loadingDone();
+  } catch (e) {
+    $("err").textContent = "Model load failed: " + (e.message || e); console.error(e);
+    $("loaderr").textContent = "Model load failed: " + (e.message || e); $("loadstage").textContent = "Could not load the models."; $("loaddismiss").hidden = false;
+  }
 }
 
 // ---------- voice list + filters built from the voices' own tags ----------

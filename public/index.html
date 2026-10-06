@@ -23,11 +23,28 @@
   .chip{display:inline-block;margin:0 4px 4px 0;padding:2px 10px;border:1px solid var(--line);border-radius:999px;font-size:.85rem;cursor:pointer;user-select:none}
   .chip.on{background:var(--acc);border-color:var(--acc);color:#fff} .chip i{opacity:.65;font-style:normal;margin-left:4px;font-size:.75rem}
   .chip.zero{opacity:.35}
+  #loading{position:fixed;inset:0;z-index:50;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:16px;transition:opacity .35s}
+  #loading.done{opacity:0;pointer-events:none}
+  #loading .card{width:100%;max-width:520px} #loading h1{font-size:1.3rem;margin:0 0 4px}
+  #loadbar{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin:14px 0 6px} #loadbar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .25s}
+  #loadstage{color:var(--mut);font-size:.9rem;min-height:1.4em} #loadrows{font-size:.8rem;color:var(--mut);margin-top:10px;max-height:30vh;overflow:auto}
+  #loaderr{color:#dc2626;margin-top:10px}
   #err{color:#dc2626;min-height:1.5em} #status{color:var(--mut)} audio{width:100%;margin-top:8px}
   #speak{position:sticky;bottom:0;background:var(--bg);padding:10px 0;border-top:1px solid var(--line);margin-top:12px}
 </style>
 </head>
 <body>
+<div id="loading" role="status" aria-live="polite">
+  <div class="card">
+    <h1>Loading speech models…</h1>
+    <div class="sub" style="margin:0">Everything runs in your browser. The first visit downloads about 1.2 GB; it is cached afterwards.</div>
+    <div id="loadbar"><i></i></div>
+    <div id="loadstage">Starting…</div>
+    <div id="loadrows"></div>
+    <div id="loaderr"></div>
+    <button id="loaddismiss" hidden style="margin-top:10px">Continue without models</button>
+  </div>
+</div>
 <main>
   <h1>Pick a voice, type text</h1>
   <p class="sub">Runs entirely in your browser (WebGPU + ONNX). The selected voice's sample is transcribed on the fly and cloned by OmniVoice to speak your text.</p>
