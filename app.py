@@ -90,4 +90,14 @@ async def preview(voice_id: str):
     return Response(data, media_type="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
-app.mount("/", StaticFiles(directory=Path(__file__).parent / "public", html=True), name="static")
+class Static(StaticFiles):
+    """Version-pinned vendor files and model parts never change: let browsers cache them for a year."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        if path.startswith(("vendor/", "models/kv/")):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+
+app.mount("/", Static(directory=Path(__file__).parent / "public", html=True), name="static")

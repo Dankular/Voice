@@ -15,5 +15,6 @@ python "$HERE/export_kv.py" "$OUT/ckpt" "$OUT/work"                             
 python "$HERE/quantize_kv.py" "$OUT/work/lm_kv_fp32.onnx" "$OUT/work/lm_kv_q4.onnx" 4 32
 python "$HERE/pack_tables.py" "$OUT/work" "$OUT/work"
 mkdir -p "$OUT/final"
+python "$HERE/split_parts.py" "$OUT/work" "$OUT/parts" 80 lm_kv_q4.onnx lm_kv_q4.onnx.data embed_text_int8.bin embed_text_scale.bin embed_audio.bin   # for git/same-origin hosting
 cp "$OUT/work"/lm_kv_q4.onnx "$OUT/work"/lm_kv_q4.onnx.data "$OUT/work"/embed_text_int8.bin "$OUT/work"/embed_text_scale.bin "$OUT/work"/embed_audio.bin "$OUT/final/"
-echo "Done: $OUT/final  (upload: huggingface-cli upload $REPO $OUT/final .)"
+echo "Same-origin hosting: copy $OUT/parts/* into public/models/kv/"; echo "Done: $OUT/final  (upload: huggingface-cli upload $REPO $OUT/final .)"

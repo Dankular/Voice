@@ -1,0 +1,43 @@
+{
+ "files": {
+  "lm_kv_q4.onnx": {
+   "size": 575687,
+   "sha256": "77d1378bd2618ef63dd4c2888d7269fe73e40d185aee4edc7b982d29aa07ae5d",
+   "parts": [
+    "lm_kv_q4.onnx"
+   ]
+  },
+  "lm_kv_q4.onnx.data": {
+   "size": 309071872,
+   "sha256": "3d8a56a448eb3ed6dd5a7cd9a8274792c890990f8cfae787947376226075bf7f",
+   "parts": [
+    "lm_kv_q4.onnx.data.part0",
+    "lm_kv_q4.onnx.data.part1",
+    "lm_kv_q4.onnx.data.part2",
+    "lm_kv_q4.onnx.data.part3"
+   ]
+  },
+  "embed_text_int8.bin": {
+   "size": 155316224,
+   "sha256": "411ecf9d7cbc5347141fec4554ae106c278cb2d8558a4e10430ff61e3354f344",
+   "parts": [
+    "embed_text_int8.bin.part0",
+    "embed_text_int8.bin.part1"
+   ]
+  },
+  "embed_text_scale.bin": {
+   "size": 606704,
+   "sha256": "bdbed2799877bb2542e9587cc62a83ad68c26b332f711e3adf831f9d09aad9a3",
+   "parts": [
+    "embed_text_scale.bin"
+   ]
+  },
+  "embed_audio.bin": {
+   "size": 33587200,
+   "sha256": "d083400d34577acc8bc4cbf03adf7d2465f251f041a70690257ce147d08511fd",
+   "parts": [
+    "embed_audio.bin"
+   ]
+  }
+ }
+}
