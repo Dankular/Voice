@@ -19,9 +19,19 @@ from fastapi.staticfiles import StaticFiles
 from get_voices import fetch_page
 
 MAX_PREVIEW_BYTES = 8 * 1024 * 1024
-# fields beyond the first four are not verified against a live response (no API key in the dev sandbox)
-LIST_KEYS = ["voice_id", "name", "description", "preview_url", "gender", "accent", "age", "descriptive",
-             "use_case", "language", "category"]
+SKIP_KEYS = {"preview_url", "public_owner_id", "date_unix"}   # not shown; previews are served via /api/preview
+
+
+def _scalar_tags(v: dict) -> dict:
+    """Every simple field of a library entry, plus entries of a nested `labels` dict. The page builds its filters
+    from whatever tags are present, so no field list is hard-coded (the live response shape is unverified here)."""
+    out = {}
+    for k, val in list(v.items()) + list((v.get("labels") or {}).items() if isinstance(v.get("labels"), dict) else []):
+        if k in SKIP_KEYS or k.endswith("_url") or isinstance(val, (dict, list)):
+            continue
+        out.setdefault(k, val)
+    return out
+
 
 app = FastAPI(title="OmniVoice voices")
 _previews: dict = {}   # voice_id -> preview_url, filled only from library responses (clients can't pick URLs)
@@ -42,7 +52,7 @@ def healthz():
 @app.get("/api/voices")
 async def voices(gender: Optional[str] = None, accent: Optional[str] = None, age: Optional[str] = None,
                  language: Optional[str] = None, use_case: Optional[str] = None, search: Optional[str] = None,
-                 page: int = 0, page_size: int = Query(24, le=100)):
+                 page: int = 0, page_size: int = Query(100, le=100)):
     params = {"gender": gender, "accent": accent, "age": age, "language": language, "use_cases": use_case,
               "search": search, "page": page, "page_size": page_size}
     try:
@@ -54,7 +64,7 @@ async def voices(gender: Optional[str] = None, accent: Optional[str] = None, age
     for v in data.get("voices", []):
         if v.get("voice_id") and v.get("preview_url"):
             _previews[v["voice_id"]] = v["preview_url"]
-        out.append({k: v.get(k) for k in LIST_KEYS})
+        out.append(_scalar_tags(v))
     return {"voices": out, "has_more": data.get("has_more", False)}
 
 

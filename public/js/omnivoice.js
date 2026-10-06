@@ -9,7 +9,7 @@ import { rms } from "./audio.js";
 ort.env.wasm.wasmPaths = "/vendor/ort/";
 
 export const SAMPLE_RATE = 24000;
-const HOP = 960, MASK = 1024, NC = 8, VOCAB = 1025;
+const HOP = 960, MASK = 1024, NC = 8;
 const NONVERBAL = /\[(laughter|sigh|confirmation-en|question-en|question-ah|question-oh|question-ei|question-yi|surprise-ah|surprise-oh|surprise-wa|surprise-yo|dissatisfaction-hnn)\]/g;
 
 function rng(seed) {   // mulberry32
@@ -23,29 +23,26 @@ const combineText = (text, refText) => {
   return t.replace(/(?<=[一-鿿])\s+|\s+(?=[一-鿿])/g, "");
 };
 
-function logSoftmax(src, off, n, dst) {   // dst may alias src
-  let m = -Infinity;
-  for (let i = 0; i < n; i++) if (src[off + i] > m) m = src[off + i];
-  let s = 0;
-  for (let i = 0; i < n; i++) s += Math.exp(src[off + i] - m);
-  const l = m + Math.log(s);
-  for (let i = 0; i < n; i++) dst[i] = src[off + i] - l;
-}
-
 export class OmniVoice {
   static async load({ repo = "ct03/omnivoice-onnx-int8hq", onStatus = () => {} } = {}) {
     const base = `https://huggingface.co/${repo}/resolve/main`;
     const providers = ("gpu" in navigator) ? ["webgpu", "wasm"] : ["wasm"];
-    const mk = async (label, dir) => {
+    const gpu = providers[0] === "webgpu";
+    const mk = async (label, dir, extra = {}) => {
       const model = await fetchBytes(`${base}/${dir}/model.onnx`);
       const data = await fetchBytes(`${base}/${dir}/model.onnx_data`, (g, t) => onStatus(label, g, t));
       onStatus(label, 1, 1, "initialising");
-      return ort.InferenceSession.create(model, { executionProviders: providers, externalData: [{ path: "model.onnx_data", data }] });
+      return ort.InferenceSession.create(model, { executionProviders: providers, externalData: [{ path: "model.onnx_data", data }], ...extra });
     };
+    const post = async (name) => ort.InferenceSession.create(new Uint8Array(await (await fetch(`/models/${name}`)).arrayBuffer()),
+      { executionProviders: providers });
     const o = new OmniVoice();
     o.providers = providers;
     o.tok = await AutoTokenizer.from_pretrained(repo);
-    o.lm = await mk("OmniVoice LM", "omnivoice_lm_int8_hq");
+    // keep the logits on the GPU: they go straight into the post-processing graph, only its small output is read back
+    o.lm = await mk("OmniVoice LM", "omnivoice_lm_int8_hq", gpu ? { preferredOutputLocation: { logits: "gpu-buffer" } } : {});
+    o.postCfg = await post("post_cfg.onnx");
+    o.postNoCfg = await post("post_nocfg.onnx");
     o.decoder = await mk("codec decoder", "audio_tokenizer_decoder_int8");
     o.encoder = await mk("codec encoder", "audio_tokenizer_encoder_int8");
     return o;
@@ -74,17 +71,8 @@ export class OmniVoice {
     return { codes: Int32Array.from(t.data, Number), frames: t.dims[2], rms: r };
   }
 
-  async forward(ids, audioMask, S) {
-    const out = await this.lm.run({
-      input_ids: new ort.Tensor("int64", ids, [1, NC, S]),
-      audio_mask: new ort.Tensor("bool", audioMask, [1, S]),
-      attention_mask: new ort.Tensor("bool", new Uint8Array(S * S).fill(1), [1, 1, S, S]),
-      position_ids: new ort.Tensor("int64", BigInt64Array.from({ length: S }, (_, i) => BigInt(i)), [1, S]),
-    });
-    return out.logits.data;   // Float32Array [1, 8, S, 1025]
-  }
-
-  /** Speak `text` in the cloned voice. ref = {codes, frames, rms, text}. Returns Float32Array @ 24 kHz. */
+  /** Speak `text` in the cloned voice. ref = {codes, frames, rms, text}. Returns Float32Array @ 24 kHz.
+   *  opts: numStep, guidance (0 disables the unconditional pass: ~2x faster), speed, seed, onStep(info). */
   async synthesize(text, ref, { language = null, numStep = 32, guidance = 2.0, tShift = 0.1, layerPenalty = 5.0,
                                 positionTemp = 5.0, speed = 1.0, seed, onStep } = {}) {
     const Tr = ref.frames;
@@ -93,17 +81,35 @@ export class OmniVoice {
 
     const style = "<|denoise|>" + `<|lang_start|>${language || "None"}<|lang_end|><|instruct_start|>None<|instruct_end|>`;
     const prefix = [...this.ids(style), ...this.textIds(`<|text_start|>${combineText(text, ref.text)}<|text_end|>`)];
-    const P = prefix.length, t0 = P + Tr, S = t0 + T;
+    const P = prefix.length, t0 = P + Tr;
 
-    // cond ids [8, S]: text prefix (same id on every codebook) | reference codes | MASK target
-    const cond = new BigInt64Array(NC * S).fill(BigInt(MASK));
+    // Shapes are bucketed so the WebGPU backend can reuse the kernels it compiled for earlier utterances. Padding
+    // positions are masked out of attention (4D mask), so real positions see exactly what they would unpadded.
+    const Tu = bucket(T, 32);                 // target slots read back per step (>= T)
+    const Lc = t0 + T, Sc = bucket(t0 + Tu, 64);
+
+    const condIds = new BigInt64Array(NC * Sc).fill(BigInt(MASK));
     for (let c = 0; c < NC; c++) {
-      for (let i = 0; i < P; i++) cond[c * S + i] = BigInt(prefix[i]);
-      for (let t = 0; t < Tr; t++) cond[c * S + P + t] = BigInt(ref.codes[c * Tr + t]);
+      for (let i = 0; i < P; i++) condIds[c * Sc + i] = BigInt(prefix[i]);
+      for (let t = 0; t < Tr; t++) condIds[c * Sc + P + t] = BigInt(ref.codes[c * Tr + t]);
     }
-    const condMask = new Uint8Array(S); condMask.fill(1, P);             // reference + target are audio positions
-    const unc = new BigInt64Array(NC * T).fill(BigInt(MASK));            // unconditional branch: target only
-    const uncMask = new Uint8Array(T).fill(1);
+    const condAudio = new Uint8Array(Sc); condAudio.fill(1, P, Lc);    // reference + target are audio positions
+    const uncIds = new BigInt64Array(NC * Tu).fill(BigInt(MASK));      // unconditional branch: target only
+    const uncAudio = new Uint8Array(Tu); uncAudio.fill(1, 0, T);
+
+    const feeds = (ids, audio, L, S) => ({
+      input_ids: new ort.Tensor("int64", ids, [1, NC, S]),
+      audio_mask: new ort.Tensor("bool", audio, [1, S]),
+      attention_mask: new ort.Tensor("bool", blockMask(L, S), [1, 1, S, S]),
+      position_ids: new ort.Tensor("int64", positions(S), [1, S]),
+    });
+    const cf = feeds(condIds, condAudio, Lc, Sc);                      // built once; input_ids is updated in place
+    const uf = guidance !== 0 ? feeds(uncIds, uncAudio, T, Tu) : null;
+    const post = guidance !== 0 ? this.postCfg : this.postNoCfg;
+    const t0T = new ort.Tensor("int64", BigInt64Array.of(BigInt(t0)), [1]);
+    const extra = guidance !== 0
+      ? { t0: t0T, g: new ort.Tensor("float32", Float32Array.of(guidance), []) }
+      : { t0: t0T, tlen: new ort.Tensor("int64", BigInt64Array.of(BigInt(Tu)), [1]) };
 
     // unmasking schedule (upstream _get_time_steps)
     const ts = Array.from({ length: numStep + 1 }, (_, i) => tShift * (i / numStep) / (1 + (tShift - 1) * (i / numStep)));
@@ -115,42 +121,56 @@ export class OmniVoice {
 
     const rand = rng(seed);
     const tokens = new Int32Array(NC * T).fill(MASK);
-    const cl = new Float32Array(VOCAB), ul = new Float32Array(VOCAB), mix = new Float32Array(VOCAB);
+    const timing = { steps: [], shapes: { cond: Sc, uncond: guidance !== 0 ? Tu : 0, T } };
 
     for (let s = 0; s < numStep; s++) {
       const k = sched[s];
       if (k <= 0) continue;
-      const cLog = await this.forward(cond, condMask, S);
-      const uLog = guidance !== 0 ? await this.forward(unc, uncMask, T) : null;
-      const cand = [];                                                   // [score, flatIndex, predToken]
+      const m0 = performance.now();
+      const cLog = (await this.lm.run(cf)).logits;                     // GPU-resident [1,8,Sc,1025]
+      const uLog = uf ? (await this.lm.run(uf)).logits : null;
+      const m1 = performance.now();
+      const o = await post.run(uLog ? { cond: cLog, uncond: uLog, ...extra } : { cond: cLog, ...extra });
+      cLog.dispose?.(); uLog?.dispose?.();
+      const pred = o.pred.data, conf = o.conf.data;                    // [1,8,Tu] each: tiny readback
+      const m2 = performance.now();
+
+      const cand = [];                                                 // [score, flatIndex, predToken]
       for (let c = 0; c < NC; c++) for (let t = 0; t < T; t++) {
         const idx = c * T + t;
-        if (tokens[idx] !== MASK) continue;                              // already unmasked: can't be picked
-        logSoftmax(cLog, (c * S + t0 + t) * VOCAB, VOCAB, cl);
-        if (uLog) {
-          logSoftmax(uLog, (c * T + t) * VOCAB, VOCAB, ul);
-          for (let v = 0; v < VOCAB; v++) mix[v] = cl[v] + guidance * (cl[v] - ul[v]);
-          logSoftmax(mix, 0, VOCAB, mix);
-        } else mix.set(cl);
-        let best = -Infinity, arg = 0;
-        for (let v = 0; v < MASK; v++) if (mix[v] > best) { best = mix[v]; arg = v; }   // mask id is excluded
-        let score = best - c * layerPenalty;
+        if (tokens[idx] !== MASK) continue;                            // already unmasked: can't be picked
+        let score = conf[c * Tu + t] - c * layerPenalty;
         if (positionTemp > 0) score = score / positionTemp - Math.log(-Math.log(rand() + 1e-10) + 1e-10);
-        cand.push([score, idx, arg]);
+        cand.push([score, idx, Number(pred[c * Tu + t])]);
       }
-      cand.sort((a, b) => b[0] - a[0]);
+      cand.sort((x, y) => y[0] - x[0]);
       for (let j = 0; j < Math.min(k, cand.length); j++) {
-        const [, idx, tok] = cand[j];
+        const [, idx, tok] = cand[j], c = Math.floor(idx / T), t = idx % T;
         tokens[idx] = tok;
-        const c = Math.floor(idx / T), t = idx % T;
-        cond[c * S + t0 + t] = BigInt(tok); unc[c * T + t] = BigInt(tok);
+        condIds[c * Sc + t0 + t] = BigInt(tok); uncIds[c * Tu + t] = BigInt(tok);
       }
-      onStep?.(s + 1, numStep);
+      const m3 = performance.now();
+      const info = { step: s + 1, of: numStep, lmMs: m1 - m0, postMs: m2 - m1, jsMs: m3 - m2 };
+      timing.steps.push(info);
+      onStep?.(info);
     }
 
     const out = await this.decoder.run({ audio_codes: new ort.Tensor("int64", BigInt64Array.from(tokens, BigInt), [1, NC, T]) });
-    return postProcess(Float32Array.from(out.audio.data), ref.rms);
+    const wav = postProcess(Float32Array.from(out.audio.data), ref.rms);
+    wav.timing = timing;
+    return wav;
   }
+}
+
+const bucket = (n, m) => Math.ceil(n / m) * m;
+const posCache = new Map();
+const positions = (S) => posCache.get(S) ?? (posCache.set(S, BigInt64Array.from({ length: S }, (_, i) => BigInt(i))), posCache.get(S));
+// real positions [0,L) attend to each other; padding positions attend only to themselves (keeps rows non-empty)
+function blockMask(L, S) {
+  const m = new Uint8Array(S * S);
+  for (let r = 0; r < L; r++) m.fill(1, r * S, r * S + L);
+  for (let r = L; r < S; r++) m[r * S + r] = 1;
+  return m;
 }
 
 // Upstream post-processing minus silence removal: match quiet references' loudness, then 0.1 s fade + pad.

@@ -17,6 +17,12 @@
   .voice{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:6px;cursor:pointer}
   .voice.sel{border-color:var(--acc);background:var(--sel)} .voice .n{font-weight:600} .voice .d{color:var(--mut);font-size:.85rem}
   .voice .info{flex:1;min-width:0} .voice .d{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  label{color:var(--mut);font-size:.9rem;display:inline-flex;gap:6px;align-items:center}
+  select{font:inherit;padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+  .fgroup{margin-bottom:8px} .fgroup>b{font-size:.8rem;color:var(--mut);display:block;margin-bottom:2px}
+  .chip{display:inline-block;margin:0 4px 4px 0;padding:2px 10px;border:1px solid var(--line);border-radius:999px;font-size:.85rem;cursor:pointer;user-select:none}
+  .chip.on{background:var(--acc);border-color:var(--acc);color:#fff} .chip i{opacity:.65;font-style:normal;margin-left:4px;font-size:.75rem}
+  .chip.zero{opacity:.35}
   #err{color:#dc2626;min-height:1.5em} #status{color:var(--mut)} audio{width:100%;margin-top:8px}
   #speak{position:sticky;bottom:0;background:var(--bg);padding:10px 0;border-top:1px solid var(--line);margin-top:12px}
 </style>
@@ -28,13 +34,12 @@
   <div id="models" class="sub"></div>
 
   <form id="filters" class="row">
-    <input name="search" placeholder="Search voices">
-    <input name="gender" placeholder="Gender" list="g"><datalist id="g"><option>male</option><option>female</option></datalist>
-    <input name="accent" placeholder="Accent">
-    <input name="age" placeholder="Age" list="a"><datalist id="a"><option>young</option><option>middle_aged</option><option>old</option></datalist>
-    <input name="language" placeholder="Language (e.g. en)">
+    <input name="search" placeholder="Search by name or description…" autocomplete="off">
     <button class="primary">Search</button>
   </form>
+  <div id="facets"></div>
+  <div class="row" style="align-items:center"><span id="count" class="sub" style="margin:0"></span><button id="clear" type="button" hidden>Clear filters</button></div>
+
 
   <div id="list"></div>
   <div class="row"><button id="more" hidden>Load more</button></div>
@@ -42,9 +47,15 @@
   <div id="speak">
     <div><b id="picked">No voice selected</b></div>
     <textarea id="text" rows="3" maxlength="300" placeholder="Text to speak"></textarea>
-    <div class="row"><button id="go" class="primary" disabled>Speak</button><span id="status"></span></div>
+    <div class="row">
+      <label>Steps <select id="steps"><option>32</option><option selected>16</option><option>12</option><option>8</option></select></label>
+      <label>Voice sample <select id="refcap"><option value="5">5 s (can drop words)</option><option value="8">8 s</option><option value="12" selected>12 s</option><option value="20">20 s</option></select></label>
+      <label><input type="checkbox" id="cfg" checked> Guidance (better, ~2× slower)</label>
+    </div>
+    <div class="row"><button id="go" class="primary" disabled>Speak</button><button id="stop" hidden>Stop</button><span id="status"></span></div>
+    <div id="perf" class="sub" style="font-size:.85rem"></div>
     <div id="err"></div>
-    <audio id="audio" controls hidden></audio>
+    <audio id="audio" controls hidden></audio><a id="dl" download="speech.wav" hidden>Download WAV</a>
   </div>
 </main>
 <script type="module" src="/js/app.js"></script>

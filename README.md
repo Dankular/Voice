@@ -22,6 +22,28 @@ ELEVENLABS_API_KEY=... uvicorn app:app --port 10000
 ```
 Render: `render.yaml` (Docker, free plan, set `ELEVENLABS_API_KEY` in the dashboard).
 
+## Speed
+Per step the LM runs twice (conditional + unconditional guidance). What the code does about cost:
+- **GPU-resident post-processing:** LM logits stay on the GPU and go through a tiny ONNX graph (`public/models/post_*.onnx`,
+  built by `scripts/make_postproc.py`) that does the guidance mix, log-softmax, argmax and confidence; only ~8×T values
+  are read back (previously 2 × ~13 MB logits plus JS exp/log loops per step).
+- **Shape bucketing:** sequence lengths are padded to multiples of 64/32 so WebGPU kernels compiled for one utterance can
+  be reused. Padding is masked out of attention; verified identical to unpadded (max logit diff 0.0, Python/CPU).
+- **Reused tensors:** attention mask / position ids are built once per utterance instead of every forward.
+- **Sentence chunking + queued playback:** audio starts after the first sentence; a live readout shows RTF
+  (<1 = faster than real time) and per-step LM / post / JS ms, with step 1 shown separately (kernel-compile cost).
+- **Knobs:** steps (default 16), guidance on/off (off ≈ 2× faster, quality effect not measured), voice-sample length.
+- Not possible: KV caching (bidirectional attention means every position changes each step).
+
+Measured (Python/CPU, one prompt, intelligibility only via Whisper round-trip): 32, 16 and 8 steps all exact; a 5 s voice
+sample dropped the first words, 9.8 s was fine (default sample cap is 12 s). Naturalness/similarity at fewer steps is
+**not** assessed. No WebGPU timings exist yet — use the on-page readout.
+
+## Filters
+Built from the tags on the returned voices (gender, age, accent, style, use case, ... whatever is present): chips with live
+counts, OR within a tag, AND across tags, plus name/description search. Tag names are not hard-coded because the live
+response shape is unverified here.
+
 ## Models (downloaded by the browser, cached via the Cache API)
 - OmniVoice: `ct03/omnivoice-onnx-int8hq` (LM ~640 MB, codec encoder ~395 MB, decoder ~85 MB).
 - ASR: `onnx-community/whisper-base`.
