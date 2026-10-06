@@ -65,6 +65,16 @@ not guaranteed. Measure with the on-page readout.
 Other optimisations kept: shape bucketing (padding verified identical), reused tensors, GPU-side post-processing graph
 (`scripts/make_postproc.py`, verified vs numpy).
 
+## Server warm-up / keep-alive
+The speech models run in the browser, so there is nothing model-shaped for the server to hot-load; at startup `app.py`:
+- reads the static model/vendor files once (background thread) so the first download isn't served from cold disk;
+- prefetches the default voice list (`page=0`) and caches listings in memory for 10 min, which also fills the preview
+  lookup table that is otherwise empty after every restart;
+- pings its own public URL (`RENDER_EXTERNAL_URL`, or `KEEPALIVE_URL`) every 10 min so the platform doesn't spin it down for
+  idleness. `KEEPALIVE=0` disables it. A service that has already been spun down still has a cold start on its next request, and
+  I have not verified that Render counts the self-ping as traffic; a free instance kept awake all month uses ~730 of the 750 free hours.
+Tested locally with the upstream API stubbed (prefetch, cache hit, preview table); the keep-alive loop itself was not run.
+
 ## Filters
 Built from the tags on the returned voices (gender, age, accent, style, use case, ... whatever is present): chips with live
 counts, OR within a tag, AND across tags, plus name/description search. Tag names are not hard-coded because the live
