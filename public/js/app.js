@@ -104,52 +104,76 @@ function facetFields() {         // simple string tags with a usable number of d
 
 const matches = (v, skip) => [...active].every(([k, set]) => k === skip || !set.size || set.has(v[k]));
 
+const MAX_FACETS = 6;            // a few compact dropdowns, so the filters never take more than a row or two
 function renderFacets() {
   const box = $("facets"); box.innerHTML = "";
-  for (const k of facetFields()) {
+  for (const k of facetFields().slice(0, MAX_FACETS)) {
     const counts = new Map();
     for (const v of allVoices) if (v[k] && matches(v, k)) counts.set(v[k], (counts.get(v[k]) || 0) + 1);   // counts respect the other filters
     const all = [...new Set(allVoices.map((v) => v[k]).filter(Boolean))].sort((a, b) => (counts.get(b) || 0) - (counts.get(a) || 0));
-    const g = document.createElement("div"); g.className = "fgroup";
-    g.innerHTML = `<b>${esc(NICE[k] || pretty(k))}</b>`;
-    for (const val of all) {
-      const c = document.createElement("span");
-      const on = active.get(k)?.has(val);
-      c.className = "chip" + (on ? " on" : "") + (!counts.get(val) && !on ? " zero" : "");
-      c.innerHTML = `${esc(pretty(val))}<i>${counts.get(val) || 0}</i>`;
-      c.onclick = () => { const s = active.get(k) || new Set(); on ? s.delete(val) : s.add(val); active.set(k, s); renderAll(); };
-      g.appendChild(c);
-    }
-    box.appendChild(g);
+    const sel = document.createElement("select"); sel.setAttribute("aria-label", NICE[k] || pretty(k));
+    sel.innerHTML = `<option value="">${esc(NICE[k] || pretty(k))}: any</option>` +
+      all.map((val) => `<option value="${esc(val)}"${counts.get(val) ? "" : " disabled"}>${esc(pretty(val))} (${counts.get(val) || 0})</option>`).join("");
+    sel.value = [...(active.get(k) || [])][0] || "";
+    sel.onchange = () => { if (sel.value) active.set(k, new Set([sel.value])); else active.delete(k); listPage = 0; renderAll(); };
+    box.appendChild(sel);
   }
 }
 
+// one shared preview player (instead of an <audio> element per row)
+const preview = new Audio(); let previewing = null;
+preview.onended = preview.onpause = () => { previewing = null; document.querySelectorAll(".voice .play").forEach((b) => (b.textContent = "▶")); };
+function togglePreview(v, btn) {
+  const same = previewing === v.voice_id; preview.pause();
+  if (same) return;
+  preview.src = `/api/preview/${encodeURIComponent(v.voice_id)}`; previewing = v.voice_id;
+  preview.play().then(() => { btn.textContent = "■"; }).catch(() => { previewing = null; });
+}
+
+// The list never scrolls: it shows as many rows as fit, and the pager steps through the rest.
+const ROW_H = 54, ROW_GAP = 6;
+let listPage = 0, hasMore = false;
+const pageSize = () => Math.max(3, Math.floor(($("list").clientHeight + ROW_GAP) / (ROW_H + ROW_GAP)));
+
 function renderList() {
-  const shown = allVoices.filter((v) => matches(v));
+  const shown = allVoices.filter((v) => matches(v)), size = pageSize();
+  const pages = Math.max(1, Math.ceil(shown.length / size));
+  listPage = Math.min(listPage, pages - 1);
+  const from = listPage * size, view = shown.slice(from, from + size);
   $("list").innerHTML = "";
-  for (const v of shown) {
+  for (const v of view) {
     const el = document.createElement("div"); el.className = "voice" + (picked?.voice_id === v.voice_id ? " sel" : "");
     const meta = ["gender", "age", "accent", "language"].map((k) => v[k]).filter(Boolean).map(pretty).join(" · ");
-    el.innerHTML = `<div class="info"><div class="n">${esc(v.name)}</div>
-      <div class="d">${esc(meta)}${meta && v.description ? " — " : ""}${esc(v.description)}</div></div>
-      <audio controls preload="none" src="/api/preview/${encodeURIComponent(v.voice_id)}" style="width:200px;margin:0"></audio>`;
-    el.querySelector("audio").addEventListener("click", (e) => e.stopPropagation());
+    el.innerHTML = `<button type="button" class="play" aria-label="Preview ${esc(v.name)}">${previewing === v.voice_id ? "■" : "▶"}</button>
+      <div class="info"><div class="n">${esc(v.name)}</div>
+      <div class="d">${esc(meta)}${meta && v.description ? " — " : ""}${esc(v.description)}</div></div>`;
+    el.querySelector(".play").onclick = (e) => { e.stopPropagation(); togglePreview(v, e.currentTarget); };
     el.onclick = () => {
       document.querySelectorAll(".voice.sel").forEach((x) => x.classList.remove("sel"));
       el.classList.add("sel"); picked = v; $("picked").textContent = v.name; updateGo(); $("err").textContent = ""; prefetch();
     };
     $("list").appendChild(el);
   }
+  if (allVoices.length && !shown.length) $("list").innerHTML = '<div class="listmsg">No voices match these filters.</div>';
   const n = [...active.values()].reduce((a, s) => a + s.size, 0);
-  $("count").textContent = allVoices.length ? `Showing ${shown.length} of ${allVoices.length} loaded voices` : "";
+  $("count").textContent = shown.length ? `${from + 1}–${from + view.length} of ${shown.length}${hasMore ? "+" : ""}` : "";
+  $("prev").disabled = listPage === 0;
+  $("next").disabled = listPage >= pages - 1 && !hasMore;
   $("clear").hidden = !n;
-  if (allVoices.length && !shown.length) $("list").textContent = "No voices match these filters.";
 }
 const renderAll = () => { renderFacets(); renderList(); };
-$("clear").onclick = () => { active.clear(); renderAll(); };
+$("clear").onclick = () => { active.clear(); listPage = 0; renderAll(); };
+$("prev").onclick = () => { listPage = Math.max(0, listPage - 1); renderList(); };
+$("next").onclick = async () => {
+  const size = pageSize(), shown = allVoices.filter((v) => matches(v)).length;
+  if ((listPage + 1) * size >= shown && hasMore) { page++; await loadVoices(false); }   // reached the end of what is loaded: fetch more
+  if ((listPage + 1) * size < allVoices.filter((v) => matches(v)).length) listPage++;
+  renderList();
+};
+new ResizeObserver(() => allVoices.length && renderList()).observe($("list"));
 
 async function loadVoices(reset) {
-  if (reset) { page = 0; allVoices = []; active.clear(); $("list").innerHTML = ""; $("facets").innerHTML = ""; $("more").hidden = true; }
+  if (reset) { page = 0; listPage = 0; hasMore = false; allVoices = []; active.clear(); $("list").innerHTML = ""; $("facets").innerHTML = ""; }
   const q = new URLSearchParams([...last].filter(([, v]) => v)); q.set("page", page);
   try {
     const r = await fetch("/api/voices?" + q);
@@ -157,13 +181,12 @@ async function loadVoices(reset) {
     const { voices, has_more } = await r.json();
     const seen = new Set(allVoices.map((v) => v.voice_id));
     allVoices.push(...voices.filter((v) => !seen.has(v.voice_id)));
-    if (reset && !voices.length) $("list").textContent = "No voices found.";
-    renderAll();
-    $("more").hidden = !has_more;
+    hasMore = !!has_more;
+    if (reset && !voices.length) $("list").innerHTML = '<div class="listmsg">No voices found.</div>';
+    else renderAll();
   } catch (e) { $("err").textContent = String(e.message || e); }
 }
 $("filters").onsubmit = (e) => { e.preventDefault(); last = new FormData($("filters")); loadVoices(true); };
-$("more").onclick = () => { page++; loadVoices(false); };
 
 // ---------- pick -> transcribe on the fly -> clone ----------
 // Preparation (fetch sample -> transcribe -> codec-encode) does not depend on the text, so it starts as soon as a voice is
@@ -252,7 +275,7 @@ $("go").onclick = async () => {
       const avg = (k) => (rest.reduce((a, x) => a + x[k], 0) / Math.max(1, rest.length)).toFixed(0);
       lines.push(`chunk ${i + 1}: ${secs.toFixed(1)} s for ${audio.toFixed(1)} s audio (RTF ${(secs / audio).toFixed(2)}; <1 = faster than real time) · ` +
         `step 1: ${first.lmMs.toFixed(0)}+${first.postMs.toFixed(0)} ms, later steps avg LM ${avg("lmMs")} + post ${avg("postMs")} + js ${avg("jsMs")} ms · S=${wav.timing.shapes.full ?? wav.timing.shapes.cond}`);
-      $("perf").innerHTML = lines.map(esc).join("<br>");
+      $("perf").textContent = lines[lines.length - 1];
     }
     if (!cancelled) {
       $("dl").href = URL.createObjectURL(player.wav()); $("dl").hidden = false;
@@ -262,5 +285,6 @@ $("go").onclick = async () => {
   $("stop").hidden = true; updateGo();
 };
 
+if (new URLSearchParams(location.search).get("profile")) document.body.classList.add("profile");
 loadModels();
 loadVoices(true);
