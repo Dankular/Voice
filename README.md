@@ -14,12 +14,18 @@ transformers.js) → encode it with the OmniVoice codec encoder → clone it for
 - `omnivoice_tts/` + `get_voices.py tts` — the Python reference implementation (ONNX Runtime CPU). It is what was used to
   validate the approach; not used by the web app.
 
-## Listening (front of the voice-agent loop)
-`🎤 Listen` runs microphone → FireRedVAD (streaming, 10 ms frames, ONNX Runtime Web on wasm) → turn detector, entirely in the browser.
-It fires `user-speech-start` and `user-utterance` (`detail.audio` = 16 kHz mono float32, `detail.durationMs`) events on `document`.
-- `public/js/fbank.js` — Kaldi-style 80-bin log-mel fbank port (matches `kaldi_native_fbank` to ~1e-3 on log values), `firered_vad.js` — model + CMVN, `turn.js` — start/end detection, `mic.js` + `mic-worklet.js` — capture (echo cancellation requested).
-- Model files: `public/models/vad/` (from `Mazino0/fire-red-streaming-vad-onnx`, Apache-2.0).
-- Tests (need `npm ci --ignore-scripts`, plus the Python `kaldi_native_fbank` to produce the reference files): `scripts/test_vad_fbank.mjs`, `scripts/test_vad_stream.mjs`.
+## Talk (voice agent, all in the browser)
+`🎤 Talk` runs: microphone → FireRedVAD (finds your utterances) → Whisper (already loaded for voice cloning) → a small local LLM →
+OmniVoice (speaks the reply sentence by sentence). Talking over the agent stops it (barge-in).
+- LLM: `onnx-community/Qwen3-0.6B-ONNX` (`q4f16`, ~570 MB, downloaded on the first Talk click). Override with `?llm=<hf-repo>&llmdtype=<dtype>`
+  (e.g. `?llm=onnx-community/Qwen3-1.7B-ONNX`). Thinking mode is switched off in the chat template.
+- `public/js/agent.js` — turn loop + sentence chunker, `llm.js` — model wrapper (streaming + interrupt), `listen.js`/`turn.js`/`mic.js` — capture and
+  turn detection, `fbank.js` + `firered_vad.js` — the VAD (Kaldi fbank port; matches `kaldi_native_fbank` to ~1e-3 on log values).
+- VAD model files: `public/models/vad/` (from `Mazino0/fire-red-streaming-vad-onnx`, Apache-2.0).
+- Events on `document`: `user-speech-start`, `user-utterance` (`detail.audio` 16 kHz mono float32, `detail.durationMs`).
+- Tests: `node scripts/test_agent.mjs` (no setup); `scripts/test_vad_fbank.mjs` / `scripts/test_vad_stream.mjs` need `npm ci --ignore-scripts` and reference
+  files produced with Python `kaldi_native_fbank` (see the header of each script).
+- Not verified here (no WebGPU/mic in CI): real-time speed of LLM + OmniVoice together on one GPU, and echo handling on loudspeakers (use headphones if the agent hears itself).
 
 ## Run / deploy
 ```bash

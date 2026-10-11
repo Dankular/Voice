@@ -47,6 +47,8 @@
   #err{color:var(--err);font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.2em}
   #perf,#prof{color:var(--mut);font-size:.75rem;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #prof{display:none} body.profile #prof{display:block}
+  #chat{flex:1;min-height:60px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:8px;border:1px solid var(--line);border-radius:6px;padding:10px}
+  #chat .msg{font-size:.95rem;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;flex:0 0 auto} #chat .u{color:var(--mut)} #chat .a{color:var(--fg)}
   #vadbar{height:4px;border-radius:99px;background:var(--line);overflow:hidden} #vadbar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .08s}
   #vadbar.hot>i{background:var(--on)} #listen.on{border-color:var(--on);color:var(--on)}
   #out{display:flex;align-items:center;gap:10px}
@@ -95,8 +97,9 @@
     <section class="panel" aria-label="Speak">
       <b id="picked">No voice selected</b>
       <textarea id="text" maxlength="300" placeholder="Type the text to speak…"></textarea>
+      <div id="chat" hidden aria-live="polite"></div>
       <label id="cfg-l"><input type="checkbox" id="cfg"> Guidance (may improve quality, ~1.5× slower)</label>
-      <div class="actions"><button id="go" class="primary" disabled>Speak</button><button id="stop" hidden>Stop</button><button id="listen" type="button" title="Listen for your voice (microphone)">🎤 Listen</button><span id="status"></span></div>
+      <div class="actions"><button id="go" class="primary" disabled>Speak</button><button id="stop" hidden>Stop</button><button id="listen" type="button" title="Talk to the agent with your microphone">🎤 Talk</button><span id="status"></span></div>
       <div id="vadbar" hidden aria-hidden="true"><i></i></div>
       <div id="out"><a id="dl" download="speech.wav" hidden>Download WAV</a></div>
       <div id="err"></div>

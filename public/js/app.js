@@ -9,14 +9,15 @@ const addPunctuation = (t) => { t = t.trim(); return t && !END.has(t[t.length - 
 
 // Gapless playback of chunks as they are generated (Web Audio), plus a concatenated WAV at the end.
 class Player {
-  constructor() { this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE }); this.t = 0; this.parts = []; this.nodes = []; }
+  constructor() { this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE }); this.t = 0; this.parts = []; this.nodes = []; this.stopped = false; }
   push(f32) {
     const b = this.ctx.createBuffer(1, f32.length, SAMPLE_RATE); b.copyToChannel(f32, 0);
     const n = this.ctx.createBufferSource(); n.buffer = b; n.connect(this.ctx.destination);
     const at = Math.max(this.ctx.currentTime + 0.05, this.t); n.start(at); this.t = at + b.duration;
     this.parts.push(f32); this.nodes.push(n);
   }
-  stop() { this.nodes.forEach((n) => { try { n.stop(); } catch {} }); this.ctx.close(); }
+  stop() { this.stopped = true; this.nodes.forEach((n) => { try { n.stop(); } catch {} }); this.ctx.close(); }
+  done() { return new Promise((res) => { const w = () => (this.stopped || this.ctx.currentTime >= this.t - 0.02 ? res() : setTimeout(w, 50)); w(); }); }   // resolves once everything pushed has been played (or stop())
   wav() { const all = new Float32Array(this.parts.reduce((a, p) => a + p.length, 0)); let o = 0; for (const p of this.parts) { all.set(p, o); o += p.length; } return wavBlob(all, SAMPLE_RATE); }
 }
 
@@ -285,32 +286,92 @@ $("go").onclick = async () => {
   $("stop").hidden = true; updateGo();
 };
 
-// ---------- listening: microphone -> FireRedVAD -> "user started / stopped speaking" (the front of the voice-agent loop) ----------
-// Each finished utterance is announced as a `user-utterance` event on document ({ audio: Float32Array 16 kHz mono, durationMs }).
-let listener = null;
-async function toggleListen() {
+// ---------- talk: microphone -> VAD -> Whisper -> local LLM -> OmniVoice, with barge-in ----------
+// FireRedVAD (listen.js) finds the user's utterances; agent.js runs the turn loop. Every utterance is also announced as a
+// `user-utterance` event on document ({ audio: Float32Array 16 kHz mono, durationMs }), and `user-speech-start` when it begins.
+let listener = null, agent = null, llmP = null;
+const chat = [];                                            // last few messages shown in the conversation view (no scrolling: older ones fall off)
+function renderChat() {
+  $("chat").innerHTML = chat.filter((m) => m.text).slice(-6).map((m) => `<div class="msg ${m.who}">${esc(m.text)}</div>`).join("");
+}
+function loadLlmOnce() {
+  return (llmP ??= (async () => {
+    const [tf, { loadLlm, DEFAULT_LLM }] = await Promise.all([import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1"), import("./llm.js")]);
+    const q = new URLSearchParams(location.search), gpu = "gpu" in navigator;
+    const got = {}, onProgress = (p) => {
+      if (p.status !== "progress" || !p.total) return;
+      got[p.file] = [p.loaded, p.total]; const v = Object.values(got), l = v.reduce((a, x) => a + x[0], 0), t = v.reduce((a, x) => a + x[1], 0);
+      $("status").textContent = `Downloading the language model… ${Math.round((100 * l) / t)}%`;
+    };
+    $("status").textContent = "Loading the language model…";
+    return loadLlm(tf, { model: q.get("llm") || DEFAULT_LLM.model, dtype: q.get("llmdtype") || (gpu ? DEFAULT_LLM.dtype : "q4"), device: gpu ? "webgpu" : "wasm", onProgress });
+  })().catch((e) => { llmP = null; throw e; }));
+}
+
+// Speaks sentences with OmniVoice as they arrive and plays them gaplessly; stop() cuts the audio immediately (barge-in).
+function makeSpeaker() {
+  let pl = null, gen = 0;
+  return {
+    async speak(text) {
+      const my = gen; pl ??= new Player(); const out = pl;
+      const ref = await prepare(picked);
+      for (const piece of chunkText(text)) {
+        if (my !== gen) throw new Error("stopped");
+        const wav = await omni.synthesize(piece, ref, { guidance: 0 });   // a chunk in flight cannot be aborted; its audio is dropped below
+        if (my !== gen) throw new Error("stopped");
+        out.push(wav);
+      }
+    },
+    finish: () => (pl ? pl.done() : Promise.resolve()),
+    stop() { gen++; pl?.stop(); pl = null; },
+  };
+}
+
+function setTalkUi(on) {
   const btn = $("listen");
-  if (listener?.running) { listener.stop(); btn.classList.remove("on"); btn.textContent = "🎤 Listen"; $("vadbar").hidden = true; $("status").textContent = ""; return; }
-  btn.disabled = true; $("err").textContent = ""; $("status").textContent = "Loading voice activity model…";
+  btn.classList.toggle("on", on); btn.textContent = on ? "🎤 Stop talking" : "🎤 Talk";
+  $("vadbar").hidden = !on; $("text").hidden = on; $("chat").hidden = !on; $("go").hidden = on; $("cfg-l").hidden = on;
+}
+const STATE_TEXT = { thinking: "Thinking…", speaking: "Speaking… (talk to interrupt)", idle: "Listening…" };
+
+async function toggleTalk() {
+  const btn = $("listen");
+  if (listener?.running) { listener.stop(); agent?.interrupt(); setTalkUi(false); $("status").textContent = ""; return; }
+  if (!(omni && transcribe)) { $("err").textContent = "The speech models are still loading."; return; }
+  if (!picked) { $("err").textContent = "Pick a voice first."; return; }
+  btn.disabled = true; $("err").textContent = "";
   try {
-    const [{ Listener, loadVad }, ort] = await Promise.all([import("./listen.js"), import("/vendor/ort/ort.webgpu.min.mjs")]);
+    $("status").textContent = "Loading voice activity model…";
+    const [{ Listener, loadVad }, ort, { Agent }] = await Promise.all([import("./listen.js"), import("/vendor/ort/ort.webgpu.min.mjs"), import("./agent.js")]);
     ort.env.wasm.wasmPaths = "/vendor/ort/";
+    const [vad, llm] = await Promise.all([loadVad(ort), loadLlmOnce()]);
+    await prepare(picked);                                      // the voice must be ready before the first reply
     const bar = $("vadbar");
-    listener ??= new Listener(await loadVad(ort), {
+    if (!agent) {
+      agent = new Agent({
+        transcribe: (a) => transcribe(a), llm, tts: makeSpeaker(),
+        on: {
+          state: (st) => { $("status").textContent = STATE_TEXT[st] || ""; if (listener) listener.turn.o.startMs = st === "speaking" ? 300 : 120; },   // harder to trigger while we are the ones talking
+          user: (t) => { chat.push({ who: "u", text: t }, { who: "a", text: "" }); renderChat(); },
+          agent: (t) => { const m = chat.at(-1); if (m?.who === "a") { m.text = t; renderChat(); } },
+          error: (e) => { $("err").textContent = "Agent error: " + (e.message || e); console.error(e); },
+        },
+      });
+    }
+    listener ??= new Listener(vad, {
       prob: (p) => { bar.firstElementChild.style.width = Math.round(p * 100) + "%"; bar.classList.toggle("hot", p >= 0.5); },
-      start: () => { $("status").textContent = "Hearing you…"; document.dispatchEvent(new CustomEvent("user-speech-start")); },
-      end: (u) => { $("status").textContent = `Heard ${(u.durationMs / 1000).toFixed(1)} s of speech.`; document.dispatchEvent(new CustomEvent("user-utterance", { detail: u })); },
-      discard: () => { $("status").textContent = "Listening…"; },
+      start: () => { agent.interrupt(); $("status").textContent = "Hearing you…"; document.dispatchEvent(new CustomEvent("user-speech-start")); },   // barge-in: stop the agent as soon as the user starts
+      end: (u) => { document.dispatchEvent(new CustomEvent("user-utterance", { detail: u })); agent.utterance(u.audio); },
       error: (e) => { $("err").textContent = "Listening failed: " + (e.message || e); console.error(e); },
     });
     await listener.start();
-    btn.classList.add("on"); btn.textContent = "🎤 Stop listening"; $("vadbar").hidden = false; $("status").textContent = "Listening…";
+    setTalkUi(true); renderChat(); $("status").textContent = STATE_TEXT.idle;
   } catch (e) {
-    $("err").textContent = (e.name === "NotAllowedError" ? "Microphone permission was denied." : "Could not start listening: " + (e.message || e)); $("status").textContent = ""; console.error(e);
+    $("err").textContent = (e.name === "NotAllowedError" ? "Microphone permission was denied." : "Could not start: " + (e.message || e)); $("status").textContent = ""; console.error(e);
   }
   btn.disabled = false;
 }
-$("listen").onclick = toggleListen;
+$("listen").onclick = toggleTalk;
 
 if (new URLSearchParams(location.search).get("profile")) document.body.classList.add("profile");
 loadModels();
