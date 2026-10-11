@@ -6,31 +6,64 @@
 <title>OmniVoice Voices</title>
 <link rel="icon" href="data:,">
 <style>
-  :root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--acc:#2563eb;--sel:#eff6ff}
+  :root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--acc:#2563eb;--sel:#eff6ff;--err:#dc2626}
   @media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--mut:#999;--line:#333;--acc:#60a5fa;--sel:#1e293b}}
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
-  main{max-width:760px;margin:0 auto;padding:24px 16px} h1{font-size:1.4rem;margin:0 0 4px}
-  .sub{color:var(--mut);margin:0 0 16px} .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
-  input,button,textarea{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
-  input{flex:1 1 130px;min-width:0} textarea{width:100%;margin:8px 0}
-  button{cursor:pointer} button.primary{background:var(--acc);border-color:var(--acc);color:#fff} button:disabled{opacity:.5}
-  .voice{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:6px;cursor:pointer}
-  .voice.sel{border-color:var(--acc);background:var(--sel)} .voice .n{font-weight:600} .voice .d{color:var(--mut);font-size:.85rem}
-  .voice .info{flex:1;min-width:0} .voice .d{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  label{color:var(--mut);font-size:.9rem;display:inline-flex;gap:6px;align-items:center}
-  select{font:inherit;padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
-  .fgroup{margin-bottom:8px} .fgroup>b{font-size:.8rem;color:var(--mut);display:block;margin-bottom:2px}
-  .chip{display:inline-block;margin:0 4px 4px 0;padding:2px 10px;border:1px solid var(--line);border-radius:999px;font-size:.85rem;cursor:pointer;user-select:none}
-  .chip.on{background:var(--acc);border-color:var(--acc);color:#fff} .chip i{opacity:.65;font-style:normal;margin-left:4px;font-size:.75rem}
-  .chip.zero{opacity:.35}
+  *{box-sizing:border-box}
+  html,body{height:100%;overflow:hidden}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
+  h1{font-size:1.2rem;margin:0}
+  input,button,textarea,select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+  button{cursor:pointer} button.primary{background:var(--acc);border-color:var(--acc);color:#fff} button:disabled{opacity:.5;cursor:default}
+  .sub{color:var(--mut)}
+
+  /* one screen, no page scroll: header + two panels that share the remaining height */
+  #app{height:100dvh;max-width:1100px;margin:0 auto;padding:14px 16px;display:grid;grid-template-rows:auto minmax(0,1fr);gap:12px}
+  header{display:flex;align-items:baseline;gap:12px;min-width:0}
+  #models{font-size:.8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .panels{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;min-height:0}
+  .panel{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0}
+
+  /* voices */
+  #filters{display:flex;gap:8px} #filters input{flex:1;min-width:0}
+  #facets{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px}
+  #facets select{width:100%;min-width:0;padding:5px 6px;font-size:.85rem}
+  #list{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;gap:6px}
+  .voice{flex:0 0 auto;height:54px;display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:6px;padding:0 8px 0 10px;cursor:pointer}
+  .voice.sel{border-color:var(--acc);background:var(--sel)}
+  .voice .info{flex:1;min-width:0} .voice .n{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .voice .d{color:var(--mut);font-size:.8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .voice .play{flex:0 0 auto;width:34px;height:34px;padding:0;border-radius:50%}
+  .listmsg{color:var(--mut);padding:8px 2px}
+  #pager{display:flex;align-items:center;gap:8px} #pager .sub{flex:1;text-align:center;font-size:.85rem}
+  #pager button{padding:5px 12px}
+
+  /* speaking */
+  #picked{font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #text{flex:1;min-height:60px;resize:none;width:100%}
+  .actions{display:flex;align-items:center;gap:8px;min-width:0}
+  #status{color:var(--mut);font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+  #cfg-l{color:var(--mut);font-size:.85rem;display:flex;gap:6px;align-items:center}
+  #cfg-l input{padding:0}
+  #err{color:var(--err);font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.2em}
+  #perf,#prof{color:var(--mut);font-size:.75rem;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #prof{display:none} body.profile #prof{display:block}
+  #out{display:flex;align-items:center;gap:10px}
+  audio{flex:1;min-width:0;height:36px} #dl{font-size:.85rem;white-space:nowrap}
+
+  /* narrow screens: stack the panels, still no page scroll */
+  @media (max-width:760px){
+    #app{padding:10px 12px;gap:8px} .panels{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) auto;gap:10px}
+    #facets{display:none} #text{flex:none;height:64px} #perf{display:none}
+    header{flex-direction:column;gap:0}
+  }
+
+  /* loading page */
   #loading{position:fixed;inset:0;z-index:50;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:16px;transition:opacity .35s}
   #loading.done{opacity:0;pointer-events:none}
   #loading .card{width:100%;max-width:520px} #loading h1{font-size:1.3rem;margin:0 0 4px}
   #loadbar{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin:14px 0 6px} #loadbar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .25s}
-  #loadstage{color:var(--mut);font-size:.9rem;min-height:1.4em} #loadrows{font-size:.8rem;color:var(--mut);margin-top:10px;max-height:30vh;overflow:auto}
-  #loaderr{color:#dc2626;margin-top:10px}
-  #err{color:#dc2626;min-height:1.5em} #status{color:var(--mut)} audio{width:100%;margin-top:8px}
-  #speak{position:sticky;bottom:0;background:var(--bg);padding:10px 0;border-top:1px solid var(--line);margin-top:12px}
+  #loadstage{color:var(--mut);font-size:.9rem;min-height:1.4em} #loadrows{font-size:.8rem;color:var(--mut);margin-top:10px;max-height:30vh;overflow:hidden}
+  #loaderr{color:var(--err);margin-top:10px}
 </style>
 </head>
 <body>
@@ -45,35 +78,30 @@
     <button id="loaddismiss" hidden style="margin-top:10px">Continue without models</button>
   </div>
 </div>
-<main>
-  <h1>Pick a voice, type text</h1>
-  <p class="sub">Runs entirely in your browser (WebGPU + ONNX). The selected voice's sample is transcribed on the fly and cloned by OmniVoice to speak your text.</p>
-  <div id="models" class="sub"></div>
-
-  <form id="filters" class="row">
-    <input name="search" placeholder="Search by name or description…" autocomplete="off">
-    <button class="primary">Search</button>
-  </form>
-  <div id="facets"></div>
-  <div class="row" style="align-items:center"><span id="count" class="sub" style="margin:0"></span><button id="clear" type="button" hidden>Clear filters</button></div>
-
-
-  <div id="list"></div>
-  <div class="row"><button id="more" hidden>Load more</button></div>
-
-  <div id="speak">
-    <div><b id="picked">No voice selected</b></div>
-    <textarea id="text" rows="3" maxlength="300" placeholder="Text to speak"></textarea>
-    <div class="row">
-      <label><input type="checkbox" id="cfg"> Guidance (may improve quality, ~1.5× slower)</label>
-    </div>
-    <div class="row"><button id="go" class="primary" disabled>Speak</button><button id="stop" hidden>Stop</button><span id="status"></span></div>
-    <div id="perf" class="sub" style="font-size:.85rem"></div>
-    <pre id="prof" class="sub" style="font-size:.75rem;overflow:auto"></pre>
-    <div id="err"></div>
-    <audio id="audio" controls hidden></audio><a id="dl" download="speech.wav" hidden>Download WAV</a>
+<div id="app">
+  <header>
+    <h1>OmniVoice</h1>
+    <div id="models" class="sub">Runs in your browser (WebGPU + ONNX).</div>
+  </header>
+  <div class="panels">
+    <section class="panel" aria-label="Voices">
+      <form id="filters"><input name="search" placeholder="Search voices…" autocomplete="off"><button class="primary">Search</button></form>
+      <div id="facets"></div>
+      <div id="list"></div>
+      <div id="pager"><button id="prev" type="button" aria-label="Previous voices">‹</button><span id="count" class="sub"></span><button id="next" type="button" aria-label="Next voices">›</button><button id="clear" type="button" hidden>Clear</button></div>
+    </section>
+    <section class="panel" aria-label="Speak">
+      <b id="picked">No voice selected</b>
+      <textarea id="text" maxlength="300" placeholder="Type the text to speak…"></textarea>
+      <label id="cfg-l"><input type="checkbox" id="cfg"> Guidance (may improve quality, ~1.5× slower)</label>
+      <div class="actions"><button id="go" class="primary" disabled>Speak</button><button id="stop" hidden>Stop</button><span id="status"></span></div>
+      <div id="out"><a id="dl" download="speech.wav" hidden>Download WAV</a></div>
+      <div id="err"></div>
+      <div id="perf"></div>
+      <pre id="prof"></pre>
+    </section>
   </div>
-</main>
+</div>
 <script type="module" src="/js/app.js"></script>
 </body>
 </html>
