@@ -155,12 +155,16 @@ async def preview(voice_id: str):
 
 
 class Static(StaticFiles):
-    """Version-pinned vendor files and model parts never change: let browsers cache them for a year."""
+    """Version-pinned vendor files and model parts never change: let browsers cache them for a year.
+    Everything else (index.html, js/*, models/vad) must revalidate on each load (ETag -> 304), otherwise a browser can keep an
+    old index.html next to a newer app.js (or the reverse) after a deploy and the page breaks."""
 
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
         if path.startswith(("vendor/", "models/kv/")):
             resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            resp.headers["Cache-Control"] = "no-cache"
         return resp
 
 
