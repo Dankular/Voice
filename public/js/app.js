@@ -285,6 +285,33 @@ $("go").onclick = async () => {
   $("stop").hidden = true; updateGo();
 };
 
+// ---------- listening: microphone -> FireRedVAD -> "user started / stopped speaking" (the front of the voice-agent loop) ----------
+// Each finished utterance is announced as a `user-utterance` event on document ({ audio: Float32Array 16 kHz mono, durationMs }).
+let listener = null;
+async function toggleListen() {
+  const btn = $("listen");
+  if (listener?.running) { listener.stop(); btn.classList.remove("on"); btn.textContent = "🎤 Listen"; $("vadbar").hidden = true; $("status").textContent = ""; return; }
+  btn.disabled = true; $("err").textContent = ""; $("status").textContent = "Loading voice activity model…";
+  try {
+    const [{ Listener, loadVad }, ort] = await Promise.all([import("./listen.js"), import("/vendor/ort/ort.webgpu.min.mjs")]);
+    ort.env.wasm.wasmPaths = "/vendor/ort/";
+    const bar = $("vadbar");
+    listener ??= new Listener(await loadVad(ort), {
+      prob: (p) => { bar.firstElementChild.style.width = Math.round(p * 100) + "%"; bar.classList.toggle("hot", p >= 0.5); },
+      start: () => { $("status").textContent = "Hearing you…"; document.dispatchEvent(new CustomEvent("user-speech-start")); },
+      end: (u) => { $("status").textContent = `Heard ${(u.durationMs / 1000).toFixed(1)} s of speech.`; document.dispatchEvent(new CustomEvent("user-utterance", { detail: u })); },
+      discard: () => { $("status").textContent = "Listening…"; },
+      error: (e) => { $("err").textContent = "Listening failed: " + (e.message || e); console.error(e); },
+    });
+    await listener.start();
+    btn.classList.add("on"); btn.textContent = "🎤 Stop listening"; $("vadbar").hidden = false; $("status").textContent = "Listening…";
+  } catch (e) {
+    $("err").textContent = (e.name === "NotAllowedError" ? "Microphone permission was denied." : "Could not start listening: " + (e.message || e)); $("status").textContent = ""; console.error(e);
+  }
+  btn.disabled = false;
+}
+$("listen").onclick = toggleListen;
+
 if (new URLSearchParams(location.search).get("profile")) document.body.classList.add("profile");
 loadModels();
 loadVoices(true);

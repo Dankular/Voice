@@ -6,8 +6,8 @@
 <title>OmniVoice Voices</title>
 <link rel="icon" href="data:,">
 <style>
-  :root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--acc:#2563eb;--sel:#eff6ff;--err:#dc2626}
-  @media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--mut:#999;--line:#333;--acc:#60a5fa;--sel:#1e293b}}
+  :root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--acc:#2563eb;--sel:#eff6ff;--err:#dc2626;--on:#16a34a}
+  @media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--mut:#999;--line:#333;--acc:#60a5fa;--sel:#1e293b;--on:#4ade80}}
   *{box-sizing:border-box}
   html,body{height:100%;overflow:hidden}
   body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
@@ -47,6 +47,8 @@
   #err{color:var(--err);font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.2em}
   #perf,#prof{color:var(--mut);font-size:.75rem;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #prof{display:none} body.profile #prof{display:block}
+  #vadbar{height:4px;border-radius:99px;background:var(--line);overflow:hidden} #vadbar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .08s}
+  #vadbar.hot>i{background:var(--on)} #listen.on{border-color:var(--on);color:var(--on)}
   #out{display:flex;align-items:center;gap:10px}
   audio{flex:1;min-width:0;height:36px} #dl{font-size:.85rem;white-space:nowrap}
 
@@ -94,7 +96,8 @@
       <b id="picked">No voice selected</b>
       <textarea id="text" maxlength="300" placeholder="Type the text to speak…"></textarea>
       <label id="cfg-l"><input type="checkbox" id="cfg"> Guidance (may improve quality, ~1.5× slower)</label>
-      <div class="actions"><button id="go" class="primary" disabled>Speak</button><button id="stop" hidden>Stop</button><span id="status"></span></div>
+      <div class="actions"><button id="go" class="primary" disabled>Speak</button><button id="stop" hidden>Stop</button><button id="listen" type="button" title="Listen for your voice (microphone)">🎤 Listen</button><span id="status"></span></div>
+      <div id="vadbar" hidden aria-hidden="true"><i></i></div>
       <div id="out"><a id="dl" download="speech.wav" hidden>Download WAV</a></div>
       <div id="err"></div>
       <div id="perf"></div>

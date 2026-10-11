@@ -14,6 +14,13 @@ transformers.js) → encode it with the OmniVoice codec encoder → clone it for
 - `omnivoice_tts/` + `get_voices.py tts` — the Python reference implementation (ONNX Runtime CPU). It is what was used to
   validate the approach; not used by the web app.
 
+## Listening (front of the voice-agent loop)
+`🎤 Listen` runs microphone → FireRedVAD (streaming, 10 ms frames, ONNX Runtime Web on wasm) → turn detector, entirely in the browser.
+It fires `user-speech-start` and `user-utterance` (`detail.audio` = 16 kHz mono float32, `detail.durationMs`) events on `document`.
+- `public/js/fbank.js` — Kaldi-style 80-bin log-mel fbank port (matches `kaldi_native_fbank` to ~1e-3 on log values), `firered_vad.js` — model + CMVN, `turn.js` — start/end detection, `mic.js` + `mic-worklet.js` — capture (echo cancellation requested).
+- Model files: `public/models/vad/` (from `Mazino0/fire-red-streaming-vad-onnx`, Apache-2.0).
+- Tests (need `npm ci --ignore-scripts`, plus the Python `kaldi_native_fbank` to produce the reference files): `scripts/test_vad_fbank.mjs`, `scripts/test_vad_stream.mjs`.
+
 ## Run / deploy
 ```bash
 npm ci --ignore-scripts && node scripts/vendor.mjs     # copies ORT-Web / VAD assets to public/vendor
