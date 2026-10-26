@@ -7,6 +7,7 @@ RUN npm ci --ignore-scripts && node scripts/vendor.mjs
 
 # Stage 2: static files + voice-list proxy (no models run on the server)
 FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
