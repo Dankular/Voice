@@ -1,3 +1,6 @@
 node_modules
 .git
 public/vendor
+
+# Model data is served from the S3-backed JuiceFS mount.
+public/models

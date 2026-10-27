@@ -13,5 +13,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py get_voices.py ./
 COPY public ./public
+RUN mkdir -p /app/public/models
 COPY --from=vendor /w/public/vendor ./public/vendor
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]
